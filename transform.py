@@ -6,6 +6,9 @@ from matplotlib.textpath import TextPath
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sys
 import gc
+import webbrowser
+import tempfile
+import os
 
 class FourierDrawerStatic:
     def __init__(self, text):
@@ -84,7 +87,6 @@ class FourierDrawerStatic:
         return epicycles[:self.max_epicycles_per_char]
 
     def _generate_desmos_data(self):
-        """Generates dropdown entries including the Master Pen and Sequential Bounds."""
         N = len(self.char_data)
         
         instructions = f"--- GENERATED FOR {N} SYMBOLS ---\n\n"
@@ -110,11 +112,9 @@ class FourierDrawerStatic:
                 r, f, p = epi['amp'], epi['freq'], epi['phase']
                 if r < 0.001: continue
                 
-                # Equation for the static progressive line
                 x_terms_t.append(f"{r:.3f}\\cos(2\\pi\\cdot{f}t + {p:.3f})")
                 y_terms_t.append(f"{r:.3f}\\sin(2\\pi\\cdot{f}t + {p:.3f})")
                 
-                # Equation for the moving master pen (offset by letter index 'i')
                 x_terms_a.append(f"{r:.3f}\\cos(2\\pi\\cdot{f}(a-{i}) + {p:.3f})")
                 y_terms_a.append(f"{r:.3f}\\sin(2\\pi\\cdot{f}(a-{i}) + {p:.3f})")
                 
@@ -123,7 +123,6 @@ class FourierDrawerStatic:
             x_eq_a = " + ".join(x_terms_a)
             y_eq_a = " + ".join(y_terms_a)
             
-            # Create Path Entry
             key_path = f"Path {i+1} ('{char}')"
             self.desmos_keys.append(key_path)
             
@@ -133,7 +132,6 @@ class FourierDrawerStatic:
             path_str += f"0 <= t <= \\min(1, \\max(0, a - {i}))"
             self.desmos_dict[key_path] = path_str
             
-            # Append Piecewise Logic for Master Pen
             if i < N - 1:
                 pen_x_pieces.append(f"{i}<=a<{i+1}: {x_eq_a}")
                 pen_y_pieces.append(f"{i}<=a<{i+1}: {y_eq_a}")
@@ -141,7 +139,6 @@ class FourierDrawerStatic:
                 pen_x_pieces.append(f"{i}<=a<={i+1}: {x_eq_a}")
                 pen_y_pieces.append(f"{i}<=a<={i+1}: {y_eq_a}")
 
-        # Create Master Pen Entry
         master_pen_x = "\\{" + ", ".join(pen_x_pieces) + "\\}"
         master_pen_y = "\\{" + ", ".join(pen_y_pieces) + "\\}"
         
@@ -153,7 +150,7 @@ class FourierDrawerStatic:
 class FourierApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Fourier Text Generator (Streamlined Copy)")
+        self.root.title("Fourier Text Generator")
         self.root.geometry("1150x750")
         self.drawer = None
         self._build_gui()
@@ -170,11 +167,16 @@ class FourierApp:
         self.btn_calc = ttk.Button(control_frame, text="Calculate & Plot", command=self.calculate_math)
         self.btn_calc.pack(fill=tk.X, pady=5, ipady=8)
         
-        # --- NEW DROPDOWN & COPY SECTION ---
         copy_frame = ttk.LabelFrame(control_frame, text=" Desmos Export ", padding="10")
         copy_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 5))
         
-        ttk.Label(copy_frame, text="Select Item to View/Copy:").pack(anchor=tk.W, pady=(0, 5))
+        # --- NEW AUTO-DRAW BUTTON ---
+        self.btn_auto_desmos = ttk.Button(copy_frame, text="🌐 Auto-Draw in Desmos", command=self.auto_draw_desmos, state="disabled")
+        self.btn_auto_desmos.pack(fill=tk.X, ipady=8, pady=(0, 15))
+        
+        ttk.Separator(copy_frame, orient='horizontal').pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(copy_frame, text="Manual Copy (Optional):").pack(anchor=tk.W, pady=(0, 5))
         
         self.combo_var = tk.StringVar()
         self.combo_box = ttk.Combobox(copy_frame, textvariable=self.combo_var, state="readonly")
@@ -216,7 +218,7 @@ class FourierApp:
 
         self.ax.set_aspect('equal')
         self.ax.axis('off')
-        self.ax.set_title(f"Preview: '{user_input}'\n(Dropdown populated for easy copying)")
+        self.ax.set_title(f"Preview: '{user_input}'")
 
         all_x, all_y = [], []
         for data in self.drawer.char_data:
@@ -241,10 +243,11 @@ class FourierApp:
 
         self.canvas.draw()
         
-        # Populate UI Dropdown
+        # Enable UI
         self.combo_box['values'] = self.drawer.desmos_keys
-        self.combo_box.current(0)  # Select first item (Instructions)
+        self.combo_box.current(0)
         self.btn_copy.config(state="normal")
+        self.btn_auto_desmos.config(state="normal") # Enable the new button!
         self.on_combo_select(None)
         
         self.btn_calc.config(text="Calculate & Plot")
@@ -264,10 +267,86 @@ class FourierApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(content)
             
-            # Flash the button to confirm copy
             original_text = self.btn_copy.cget("text")
             self.btn_copy.config(text="✅ Copied!")
             self.root.after(1000, lambda: self.btn_copy.config(text=original_text))
+
+    # --- NEW FUNCTION TO HANDLE AUTOMATIC DESMOS DRAWING ---
+    def auto_draw_desmos(self):
+        if not self.drawer:
+            return
+            
+        N = len(self.drawer.char_data)
+        
+        # Base HTML template pulling in the official Desmos API
+        html_lines = [
+            "<!DOCTYPE html>",
+            "<html><head><meta charset='utf-8'>",
+            "<title>Fourier Drawing</title>",
+            "<script src='https://www.desmos.com/api/v1.8/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6'></script>",
+            "<style>body, html {margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;} #calculator {width: 100%; height: 100%;}</style>",
+            "</head><body>",
+            "<div id='calculator'></div>",
+            "<script>",
+            "var elt = document.getElementById('calculator');",
+            "var calc = Desmos.GraphingCalculator(elt);",
+            # Set up the slider to animate automatically
+            f"calc.setExpression({{id: 'slider_a', latex: 'a=0', sliderBounds: {{min: 0, max: {N}, step: 0.01}}}});"
+        ]
+        
+        pen_x_pieces = []
+        pen_y_pieces = []
+        
+        for i, data in enumerate(self.drawer.char_data):
+            epicycles = data['epicycles']
+            x_terms_t, y_terms_t = [], []
+            x_terms_a, y_terms_a = [], []
+            
+            for epi in epicycles:
+                r, f, p = epi['amp'], epi['freq'], epi['phase']
+                if r < 0.001: continue
+                
+                # Double backslashes are required so JS string interprets '\cos' properly
+                x_terms_t.append(f"{r:.3f}\\\\cos(2\\\\pi\\\\cdot{f}t + {p:.3f})")
+                y_terms_t.append(f"{r:.3f}\\\\sin(2\\\\pi\\\\cdot{f}t + {p:.3f})")
+                
+                x_terms_a.append(f"{r:.3f}\\\\cos(2\\\\pi\\\\cdot{f}(a-{i}) + {p:.3f})")
+                y_terms_a.append(f"{r:.3f}\\\\sin(2\\\\pi\\\\cdot{f}(a-{i}) + {p:.3f})")
+                
+            x_eq_t = " + ".join(x_terms_t) if x_terms_t else "0"
+            y_eq_t = " + ".join(y_terms_t) if y_terms_t else "0"
+            x_eq_a = " + ".join(x_terms_a) if x_terms_a else "0"
+            y_eq_a = " + ".join(y_terms_a) if y_terms_a else "0"
+            
+            # Inject Path Bounds
+            path_latex = f"({x_eq_t}, {y_eq_t})"
+            bounds = f"\\\\min(1, \\\\max(0, a-{i}))"
+            html_lines.append(f"calc.setExpression({{id: 'path_{i}', latex: '{path_latex}', parametricDomain: {{min: '0', max: '{bounds}'}}, color: Desmos.Colors.BLUE}});")
+            
+            # Master pen logic
+            if i < N - 1:
+                pen_x_pieces.append(f"{i}<=a<{i+1}: {x_eq_a}")
+                pen_y_pieces.append(f"{i}<=a<{i+1}: {y_eq_a}")
+            else:
+                pen_x_pieces.append(f"{i}<=a<={i+1}: {x_eq_a}")
+                pen_y_pieces.append(f"{i}<=a<={i+1}: {y_eq_a}")
+
+        master_x = "\\\\{" + ", ".join(pen_x_pieces) + "\\\\}"
+        master_y = "\\\\{" + ", ".join(pen_y_pieces) + "\\\\}"
+        master_latex = f"({master_x}, {master_y})"
+        
+        # Inject Master Pen
+        html_lines.append(f"calc.setExpression({{id: 'pen', latex: '{master_latex}', color: Desmos.Colors.RED, pointStyle: Desmos.Styles.POINT}});")
+        
+        html_lines.append("</script></body></html>")
+        
+        # Create a temporary HTML file and open it in the default browser
+        fd, temp_path = tempfile.mkstemp(suffix=".html", prefix="desmos_fourier_")
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write("\n".join(html_lines))
+            
+        webbrowser.open('file://' + os.path.realpath(temp_path))
+
 
 if __name__ == "__main__":
     if sys.platform == "win32":
