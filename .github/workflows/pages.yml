@@ -14,7 +14,8 @@ jobs:
   native-tests:
     uses: ./.github/workflows/rust.yml
   build:
-    runs-on: ubuntu-latest
+    # Playwright 1.51.1 supports Ubuntu 24.04; pin the runner to avoid OS drift.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
