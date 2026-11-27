@@ -1,0 +1,27 @@
+# Fourier Transformer — Rust port
+
+A native desktop rewrite of transform.py. The original Python implementation remains available for comparison.
+
+## Run (Windows / Linux)
+Install stable Rust from https://rustup.rs/ and on Windows install Visual Studio Build Tools with Desktop development with C++. On Linux install the native windowing/graphics dependencies required by eframe and rfd.
+
+```sh
+cargo run --release
+cargo test
+```
+
+Select text or PNG/JPEG/BMP, set detail, calculate, then export Desmos HTML and open the saved file in a browser. The HTML requires internet access and the original project's Desmos API demo key; no image is uploaded by the Rust application. Manual equations and clipboard output are available.
+
+## Memory design
+- 4 megapixel input ceiling, 64 MiB decoder allocation limit (decoder-dependent).
+- Maximum 200 paths, 500 requested coefficients per path, 12,000 retained coefficients total.
+- Compact f32 coefficients (12 bytes each, at most 144,000 bytes of coefficient payload); previews independently decimated.
+- FFT per contour; no retained input image or FFT buffers in completed drawings.
+- One worker at a time; old results dropped before processing.
+- On-demand manual equations; HTML streamed one expression at a time. UI displays only the first 4,000 characters of an equation.
+- Browser memory is separate: Desmos may still consume substantial RAM when graphing thousands of terms.
+
+These limits bound major data structures, not total process RSS. Contour extraction still temporarily stores all detected boundaries; pathological images can use substantial RAM. Resize large images before use. Text uses installed fonts and separate closed glyph outlines rather than joining unrelated contours; image threshold and tracing are approximate equivalents, not bit-identical OpenCV output. HTML uses per-path restricted pen points instead of one giant piecewise point. Manual export retains the master pen. Browser auto-launch replaced with explicit file export.
+
+## Validation
+Unit tests cover FFT frequency, repeated points and export structure. Windows/Linux CI checks the build and runs tests. No measured RAM reduction or visual parity is claimed until tested on identical inputs. Compare process peak working set in Task Manager or /usr/bin/time -v using the same image, contour count and detail. Measure browser separately and check repeated calculations, large images, symbols, and Desmos animation.
