@@ -11,7 +11,7 @@ pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Coeff { pub freq: i32, pub amp: f32, pub phase: f32 }
-pub struct DrawingPath { pub name: String, pub preview: Vec<C>, pub coeff: Vec<Coeff> }
+pub struct DrawingPath { pub name: String, pub preview: Vec<C>, pub coeff: Vec<Coeff>, pub color: [u8;3] }
 pub struct Drawing { pub paths: Vec<DrawingPath>, pub limited: bool }
 impl Drawing {
     pub fn new() -> Self { Self { paths: Vec::new(), limited: false } }
@@ -33,7 +33,7 @@ impl Drawing {
         if cap < detail && coeff.len() > cap { self.limited = true; }
         coeff.truncate(cap);
         coeff.shrink_to_fit();
-        self.paths.push(DrawingPath { name, preview, coeff });
+        self.paths.push(DrawingPath { name, preview, coeff, color: [45,112,179] });
     }
 }
 pub fn resample(points: &[C], n: usize) -> Vec<C> {
@@ -106,16 +106,112 @@ pub fn text_drawing(input:&str, detail:usize)->Result<Drawing>{
     }
     if drawing.paths.is_empty(){return Err("No outlines found".into());} Ok(drawing)
 }
-pub fn image_drawing(path:&Path, detail:usize, max_contours:usize)->Result<Drawing>{
+pub fn image_drawing(path:&Path, detail:usize, max_contours:usize, color:bool, sensitivity:u8)->Result<Drawing>{
     let open=|| image::ImageReader::open(path).map_err(|e|e.to_string())?.with_guessed_format().map_err(|e|e.to_string());
     let (w,h)=open()?.into_dimensions().map_err(|e|e.to_string())?;
     if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS {return Err("Image exceeds 4 megapixels; resize first.".into());}
     let mut reader=open()?;let mut limits=image::Limits::default();
     limits.max_image_width=Some(w);limits.max_image_height=Some(h);limits.max_alloc=Some(64*1024*1024);reader.limits(limits);
-    let gray=reader.decode().map_err(|e|e.to_string())?.into_luma8();
-    gray_drawing(gray, detail, max_contours, false)
+    decoded_drawing(reader.decode().map_err(|e|e.to_string())?, detail, max_contours, color, sensitivity)
 }
 
+// White compositing prevents invisible RGB under transparent pixels from becoming edges.
+pub fn decoded_drawing(input:image::DynamicImage, detail:usize, cap:usize, color:bool, sensitivity:u8)->Result<Drawing>{
+    let (w,h)=(input.width(),input.height());
+    if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS {return Err("Image exceeds 4 MP".into());}
+    let mut rgb=if input.color().has_alpha(){
+        let rgba=input.into_rgba8();
+        image::RgbImage::from_fn(w,h,|x,y|{
+            let p=rgba.get_pixel(x,y);let a=p[3] as u16;
+            image::Rgb(std::array::from_fn(|k|((p[k] as u16*a+255*(255-a)+127)/255) as u8))
+        })
+    }else{input.into_rgb8()};
+    if !color {return gray_drawing(image::DynamicImage::ImageRgb8(rgb).into_luma8(),detail,cap,false);}
+    // Bound the gradient and contour stage independently of decoded image dimensions.
+    const TRACE_PIXELS:f64=1_500_000.;
+    if w as f64*h as f64>TRACE_PIXELS{
+        let s=(TRACE_PIXELS/(w as f64*h as f64)).sqrt();
+        rgb=image::imageops::resize(&rgb,((w as f64*s) as u32).max(1),((h as f64*s) as u32).max(1),image::imageops::FilterType::Triangle);
+    }
+    color_drawing(&rgb,detail,cap,sensitivity)
+}
+/// Max-channel Sobel gradient, with directional non-maximum suppression.
+/// Captures chromatic boundaries even when grayscale luminance is identical.
+pub fn color_drawing(rgb:&image::RgbImage,detail:usize,cap:usize,sensitivity:u8)->Result<Drawing>{
+    let (w,h)=rgb.dimensions();
+    let n=u64::from(w)*u64::from(h);
+    if w<3||h<3||n>1_500_000{return Err("Color tracing requires 3x3 to 1.5 MP after scaling".into());}
+    let stride=w as usize;let mut strength=vec![0u16;n as usize];let mut direction=vec![0u8;n as usize];
+    let raw=rgb.as_raw();
+    for y in 1..h as usize-1 {for x in 1..stride-1{
+        let i=y*stride+x;
+        let mut best=(0i32,0i32,0i32);
+        for k in 0..3{
+            let p=|offset:isize|raw[((i as isize+offset) as usize)*3+k] as i32;
+            let s=stride as isize;
+            let gx=p(-s+1)+2*p(1)+p(s+1)-p(-s-1)-2*p(-1)-p(s-1);
+            let gy=p(s-1)+2*p(s)+p(s+1)-p(-s-1)-2*p(-s)-p(-s+1);
+            let mag=gx.abs()+gy.abs();
+            if mag>best.0 {best=(mag,gx,gy);}
+        }
+        strength[i]=best.0 as u16;
+        let (a,b)=(best.1.abs(),best.2.abs());
+        direction[i]=if b*2<a{0}else if a*2<b{1}else if best.1.signum()==best.2.signum(){2}else{3};
+    }}
+    let mut mask=GrayImage::new(w,h);
+    let threshold=320u16-2*sensitivity.clamp(1,100) as u16;
+    for y in 1..h as usize-1{for x in 1..stride-1{
+        let i=y*stride+x;let v=strength[i];
+        if v<threshold{continue;}
+        let step=match direction[i]{0=>1,1=>stride,2=>stride+1,_=>stride-1};
+        if v>=strength[i-step]&&v>strength[i+step]{mask.as_mut()[i]=255;}
+    }}
+    drop(strength);drop(direction);
+    trace_colored(mask,rgb,detail,cap)
+}
+fn stroke_color(rgb:&image::RgbImage,pts:&[imageproc::point::Point<i32>])->[u8;3]{
+    let mut sum=[0u64;3];let mut count=0u64;
+    for p in pts.iter().step_by((pts.len()/64).max(1)){
+        let mut best=[0u8;3];let mut score=-1i32;
+        for dy in -1..=1{for dx in -1..=1{
+            let x=(p.x+dx).clamp(0,rgb.width() as i32-1) as u32;
+            let y=(p.y+dy).clamp(0,rgb.height() as i32-1) as u32;
+            let c=rgb.get_pixel(x,y).0;
+            let hi=*c.iter().max().unwrap() as i32;let lo=*c.iter().min().unwrap() as i32;
+            let s=2*(hi-lo)+(255-hi)/2;
+            if s>score{score=s;best=c;}
+        }}
+        for k in 0..3{sum[k]+=best[k] as u64;}count+=1;
+    }
+    if count==0{[45,112,179]}else{std::array::from_fn(|k|(sum[k]/count) as u8)}
+}
+fn trace_colored(mask:GrayImage,rgb:&image::RgbImage,detail:usize,cap:usize)->Result<Drawing>{
+    let (w,h)=mask.dimensions();
+    let mut contours=imageproc::contours::find_contours::<i32>(&mask);drop(mask);
+    contours.retain(|c|c.points.len()>8);
+    contours.sort_unstable_by_key(|c|std::cmp::Reverse(c.points.len()));
+    let cap=cap.clamp(1,MAX_PATHS);let mut d=Drawing::new();d.limited=contours.len()>cap;
+    contours.truncate(cap);
+    let total=contours.len();let scale=10./w.max(h) as f32;let mut planner=FftPlanner::new();
+    let weights:Vec<f32>=contours.iter().map(|c|(c.points.len() as f32).sqrt()).collect();
+    let mut remaining_weight: f32=weights.iter().sum();
+    for (i,c) in contours.into_iter().enumerate(){
+        let used:usize=d.paths.iter().map(|p|p.coeff.len()).sum();
+        let left=MAX_COEFFICIENTS.saturating_sub(used);
+        // Reserve at least two terms for every remaining outline, and distribute detail by length.
+        let reserve=2*(total-i-1);
+        let share=((left.saturating_sub(2*(total-i)) as f32*weights[i]/remaining_weight.max(1.)) as usize+2).min(left.saturating_sub(reserve)).min(detail.clamp(1,500));
+        remaining_weight-=weights[i];
+        if share<detail{d.limited=true;}
+        let color=stroke_color(rgb,&c.points);
+        let mut p:Vec<_>=c.points.into_iter().map(|v|C::new((v.x as f32-w as f32/2.)*scale,(h as f32/2.-v.y as f32)*scale)).collect();
+        if let Some(first)=p.first().copied(){p.push(first);}
+        let n=if p.len()>600{1024}else if p.len()>200{512}else{256};
+        let before=d.paths.len();d.add(format!("Color line {}",i+1),&p,n,share,&mut planner);
+        if d.paths.len()>before{d.paths.last_mut().unwrap().color=color;}
+    }
+    if d.paths.is_empty(){return Err("No color edges found; increase sensitivity or try grayscale.".into());}Ok(d)
+}
 pub fn gray_drawing(gray: GrayImage, detail: usize, max_contours: usize, solid: bool) -> Result<Drawing> {
     let (w,h)=gray.dimensions();
     if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS { return Err("Image exceeds 4 megapixels".into()); }
@@ -197,7 +293,7 @@ pub fn export_html<W:Write>(w:&mut W,d:&Drawing)->io::Result<()>{
     writeln!(w,"calc.setExpression({{id:'a',latex:'a=0',sliderBounds:{{min:0,max:{},step:0.01}}}});",d.paths.len())?;
     for (i,p) in d.paths.iter().enumerate(){
         let mut b=Vec::new();equation(&mut b,p)?;
-        let json=serde_json::json!({"id":format!("path_{i}"),"latex":String::from_utf8(b).unwrap(),"parametricDomain":{"min":"0","max":format!("\\min(1,\\max(0,a-{i}))")},"color":"#2d70b3"});
+        let json=serde_json::json!({"id":format!("path_{i}"),"latex":String::from_utf8(b).unwrap(),"parametricDomain":{"min":"0","max":format!("\\min(1,\\max(0,a-{i}))")},"color":format!("#{:02x}{:02x}{:02x}",p.color[0],p.color[1],p.color[2])});
         writeln!(w,"calc.setExpression({json});")?;
         // Each pen point is restricted to its active path; no giant master expression.
         let mut b=Vec::new();write!(b,"(")?;axis(&mut b,p,&format!("(a-{i})"),false)?;write!(b,",")?;axis(&mut b,p,&format!("(a-{i})"),true)?;
@@ -214,6 +310,21 @@ mod tests{
         let points:Vec<_>=(0..=128).map(|i|C::from_polar(1.,std::f32::consts::TAU*i as f32/128.)).collect();
         let mut d=Drawing::new();d.add("circle".into(),&points,128,20,&mut FftPlanner::new());
         assert_eq!(d.paths[0].coeff[0].freq,1);assert!((d.paths[0].coeff[0].amp-1.).abs()<0.001);
+    }
+    #[test] fn color_boundary(){
+        // These red/green colors have approximately equal Rec.709 luminance.
+        let rgb=image::RgbImage::from_fn(96,96,|x,y|if (20..76).contains(&x)&&(20..76).contains(&y){image::Rgb([255,0,0])}else{image::Rgb([0,76,0])});
+        let d=color_drawing(&rgb,100,80,65).unwrap();
+        assert!(!d.paths.is_empty());assert!(d.paths.iter().map(|p|p.coeff.len()).sum::<usize>()<=MAX_COEFFICIENTS);
+        assert!(d.paths.iter().any(|p|p.color[0]>p.color[1]));
+    }
+    #[test] fn webp_lossless(){
+        let rgb=image::RgbImage::from_fn(64,64,|x,y|if (12..52).contains(&x)&&(12..52).contains(&y){image::Rgb([250,10,30])}else{image::Rgb([10,90,40])});
+        let mut encoded=Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut encoded).encode(rgb.as_raw(),64,64,image::ExtendedColorType::Rgb8).unwrap();
+        let decoded=image::load_from_memory(&encoded).unwrap();
+        assert_eq!(decoded.to_rgb8(),rgb);
+        assert!(!decoded_drawing(decoded,100,80,true,65).unwrap().paths.is_empty());
     }
     #[test] fn repeated_points(){let p=[C::new(1.,2.);3];assert_eq!(resample(&p,10),vec![p[0];10]);}
     #[test] fn export(){let mut d=Drawing::new();d.add("test".into(),&[C::new(0.,0.),C::new(1.,0.),C::new(0.,0.)],32,10,&mut FftPlanner::new());let mut b=vec![];export_html(&mut b,&d).unwrap();assert!(String::from_utf8(b).unwrap().contains("parametricDomain"));}

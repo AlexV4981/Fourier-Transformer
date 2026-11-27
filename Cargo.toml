@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 rustfft = "6.2"
-image = { version = "0.25", default-features = false, features = ["png","jpeg","bmp"] }
+image = { version = "0.25", default-features = false, features = ["png","jpeg","bmp","webp"] }
 imageproc = { version = "0.25", default-features = false }
 serde_json = "1"
 

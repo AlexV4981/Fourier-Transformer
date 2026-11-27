@@ -8,6 +8,6 @@ crate-type = ["cdylib"]
 fourier-transformer = { path = ".." }
 wasm-bindgen = "0.2"
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png","jpeg","bmp"] }
+image = { version = "0.25", default-features = false, features = ["png","jpeg","bmp","webp"] }
 [profile.release]
 lto = "thin"

@@ -2,20 +2,20 @@ use eframe::egui;
 use fourier_transformer::{Drawing, text_drawing, image_drawing, manual, export_html};
 use std::{path::PathBuf, sync::mpsc, io::{BufWriter,Write}};
 struct App {
-    image_mode:bool,text:String,file:Option<PathBuf>,detail:usize,contours:usize,
+    image_mode:bool,text:String,file:Option<PathBuf>,detail:usize,contours:usize,color:bool,sensitivity:u8,
     drawing:Option<Drawing>,selected:usize,output:String,status:String,
     worker:Option<mpsc::Receiver<Result<Drawing,String>>>,
 }
 impl Default for App {
-    fn default()->Self{Self{image_mode:false,text:"I [heart] MATH".into(),file:None,detail:150,contours:80,drawing:None,selected:0,output:String::new(),status:String::new(),worker:None}}
+    fn default()->Self{Self{image_mode:false,text:"I [heart] MATH".into(),file:None,detail:150,contours:80,color:true,sensitivity:65,drawing:None,selected:0,output:String::new(),status:String::new(),worker:None}}
 }
 impl App {
     fn calculate(&mut self,ctx:egui::Context){
-        let image=self.image_mode;let text=self.text.clone();let file=self.file.clone();let detail=self.detail;let contours=self.contours;
+        let image=self.image_mode;let text=self.text.clone();let file=self.file.clone();let detail=self.detail;let contours=self.contours;let color=self.color;let sensitivity=self.sensitivity;
         self.drawing=None;self.output=String::new();self.selected=0;self.status="Calculating…".into();
         let (tx,rx)=mpsc::channel();self.worker=Some(rx);
         std::thread::spawn(move||{
-            let result=if image{file.ok_or_else(||"Select an image".to_string()).and_then(|p|image_drawing(&p,detail,contours))}else{text_drawing(&text,detail)};
+            let result=if image{file.ok_or_else(||"Select an image".to_string()).and_then(|p|image_drawing(&p,detail,contours,color,sensitivity))}else{text_drawing(&text,detail)};
             let _=tx.send(result);ctx.request_repaint();
         });
     }
@@ -48,8 +48,10 @@ impl eframe::App for App{
                 ui.horizontal(|ui|{ui.radio_value(&mut self.image_mode,false,"Text");ui.radio_value(&mut self.image_mode,true,"Image");});
                 if old!=self.image_mode{self.detail=if self.image_mode{300}else{150};}
                 if self.image_mode{
-                    if ui.button("Browse image").clicked(){self.file=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","bmp"]).pick_file();}
+                    if ui.button("Browse image").clicked(){self.file=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","bmp","webp"]).pick_file();}
                     if let Some(p)=&self.file{ui.label(p.display().to_string());}
+                    ui.checkbox(&mut self.color,"Color-aware tracing");
+                    if self.color {ui.add(egui::Slider::new(&mut self.sensitivity,1..=100).text("Edge sensitivity"));}
                     ui.add(egui::Slider::new(&mut self.contours,5..=200).text("Max contours"));
                 }else{ui.text_edit_singleline(&mut self.text);}
                 ui.add(egui::Slider::new(&mut self.detail,50..=500).text("Max epicycles"));
@@ -79,10 +81,10 @@ impl eframe::App for App{
             for p in &d.paths{for v in &p.preview{minx=minx.min(v.re);maxx=maxx.max(v.re);miny=miny.min(v.im);maxy=maxy.max(v.im);}}
             if !minx.is_finite(){return;}
             let scale=(rect.width()/(maxx-minx).max(0.01)).min(rect.height()/(maxy-miny).max(0.01))*0.9;
-            let center=rect.center();let painter=ui.painter_at(rect);
+            let center=rect.center();let painter=ui.painter_at(rect);painter.rect_filled(rect,0.,egui::Color32::WHITE);
             for p in &d.paths{
                 let points=p.preview.iter().map(|v|egui::pos2(center.x+(v.re-(minx+maxx)*0.5)*scale,center.y-(v.im-(miny+maxy)*0.5)*scale)).collect();
-                painter.add(egui::Shape::line(points,egui::Stroke::new(1.5,egui::Color32::from_rgb(45,112,179))));
+                painter.add(egui::Shape::line(points,egui::Stroke::new(1.5,egui::Color32::from_rgb(p.color[0],p.color[1],p.color[2]))));
             }
         });
     }
