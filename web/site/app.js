@@ -1,24 +1,26 @@
 const $=id=>document.getElementById(id), canvas=$('plot'), ctx=canvas.getContext('2d');
 let drawing=[], curves=[], bounds=null, position=0, playing=false, last=0, req=0, full='', busy=false, animationId=0;
-let worker, pending=null, workerUsed=false;
+let worker, pending=null, workerUsed=false, workerReady=false;
 const controls=['play','reset','equation','copy','export','finish'];
 function enabled(v){for(const id of controls)$(id).disabled=!v;}
 function status(s){$('status').textContent=s;}
-function fail(e){busy=false;$('calculate').disabled=false;status(String(e));}
+function fail(e){busy=false;pending=null;$('calculate').disabled=false;status(String(e));}
 function startWorker(){
  if(worker)worker.terminate();
- worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
- worker.onerror=e=>{pending=null;fail(e.message);};
- worker.onmessage=handleMessage;
+ workerReady=false;
+ const current=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
+ worker=current;
+ current.onerror=e=>{if(current!==worker)return;workerReady=false;fail(e.message);};
+ current.onmessage=e=>{if(current===worker)handleMessage(e);};
 }
 function sendCalculation(message, transfer){
  // WASM linear memory cannot shrink. Retire the previous worker on recalculation.
- if(workerUsed){pending={message,transfer};startWorker();}else{workerUsed=true;worker.postMessage(message,transfer);}
+ if(workerUsed||!workerReady){pending={message,transfer};startWorker();}else{workerUsed=true;worker.postMessage(message,transfer);}
 }
 function requestEquation(){full='';$('copy').disabled=true;$('output').value='Loading…';worker.postMessage({kind:'equation',index:Number($('equation').value),id:++req});}
 function handleMessage({data:m}){
- if(m.kind==='ready'){if(pending){const p=pending;pending=null;workerUsed=true;worker.postMessage(p.message,p.transfer);}else{$('calculate').disabled=false;status('Ready');}}
- if(m.kind==='error'){pending=null;fail(m.message);}
+ if(m.kind==='ready'){workerReady=true;if(pending){const p=pending;pending=null;workerUsed=true;worker.postMessage(p.message,p.transfer);}else{$('calculate').disabled=false;status('Ready');}}
+ if(m.kind==='error'){if(m.operation==='init')workerReady=false;if(m.operation==='equation'&&m.id!==req)return;if(m.operation==='equation'){$('output').value=m.message;$('copy').disabled=true;status(m.message);return;}if(m.operation==='export'){status(m.message);return;}fail(m.message);}
  if(m.kind==='drawing'){
   busy=false;drawing=m.value.paths;position=0;playing=false;$('play').textContent='Play';
   curves=drawing.map(p=>Array.from({length:513},(_,i)=>point(p,i/512)));
@@ -29,8 +31,16 @@ function handleMessage({data:m}){
   $('equation').replaceChildren(new Option('Instructions',0),...drawing.map((p,i)=>new Option('Path '+(i+1)+' ('+p.name+')',i+1)),new Option('Master Pen',drawing.length+1));
   enabled(true);$('calculate').disabled=false;status('Ready');requestEquation();render();
  }
- if(m.kind==='equation'&&m.id===req){full=m.value;$('output').value=full.slice(0,4000)+(full.length>4000?'\n[Preview truncated; copy includes full equation]':'');$('copy').disabled=false;}
- if(m.kind==='export'){const url=URL.createObjectURL(new Blob([m.value],{type:'text/html'}));const a=document.createElement('a');a.href=url;a.download='fourier-desmos.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status('Desmos HTML exported.');}
+ if(m.kind==='equation'&&m.id===req){
+   full=m.value;
+   // Keep the parameter bounds visible even if the equation is very long.
+   const marker=full.lastIndexOf('\n\nBounds:');
+   const body=marker>=0?full.slice(0,marker):full;
+   const tail=marker>=0?full.slice(marker):'';
+   $('output').value=body.length>4000?body.slice(0,4000)+'\n[Preview truncated; copy includes full equation]'+tail:full;
+   $('copy').disabled=false;
+ }
+ if(m.kind==='export'&&!busy&&drawing.length){const url=URL.createObjectURL(new Blob([m.value],{type:'text/html'}));const a=document.createElement('a');a.href=url;a.download='fourier-desmos.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status('Desmos HTML exported.');}
 };
 function point(p,t){let x=0,y=0;for(const [f,r,a] of p.coeff){const q=2*Math.PI*f*t+a;x+=r*Math.cos(q);y+=r*Math.sin(q);}return [x,y];}
 function project([x,y]){const [a,b,c,d]=bounds,s=.9*Math.min(canvas.width/Math.max(b-a,.01),canvas.height/Math.max(d-c,.01));return [canvas.width/2+(x-(a+b)/2)*s,canvas.height/2-(y-(c+d)/2)*s];}
@@ -63,7 +73,7 @@ $('calculate').onclick=async()=>{
  }catch(e){fail(e);}
 };
 $('equation').onchange=requestEquation;
-$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(full);status('Copied complete equation');}catch(e){status('Clipboard blocked: '+e.message);}};
+$('copy').onclick=async()=>{const selected=req;try{await navigator.clipboard.writeText(full);if(selected===req&&!busy)status('Copied complete equation');}catch(e){if(selected===req&&!busy)status('Clipboard blocked: '+e.message);}};
 $('export').onclick=()=>worker.postMessage({kind:'export'});
 
 startWorker();

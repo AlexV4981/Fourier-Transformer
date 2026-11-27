@@ -12,11 +12,12 @@ const server=createServer(async(req,res)=>{
  }catch{res.writeHead(404).end();}
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
-let browser;
+let browser,page;
 try{
  browser=await chromium.launch({headless:true});
  const context=await browser.newContext({acceptDownloads:true,permissions:['clipboard-read','clipboard-write']});
- const page=await context.newPage();const errors=[];
+ page=await context.newPage();const errors=[];
+ page.on('console',m=>{if(m.type()==='error')console.log('browser console:',m.text());});
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Ready',{},{timeout:60000});
@@ -34,9 +35,17 @@ try{
  await calc();
  await page.click('#finish');
  await page.selectOption('#equation','1');
- await page.waitForFunction(()=>document.querySelector('#output').value.includes('Bounds:'));
+ await page.waitForFunction(()=>!document.querySelector('#copy').disabled&&document.querySelector('#output').value.includes('Bounds:'));
+ console.log('verified: path preview preserves parameter bounds');
  await page.click('#copy');await page.waitForFunction(()=>document.querySelector('#status').textContent==='Copied complete equation');
- assert.ok((await page.evaluate(()=>navigator.clipboard.readText())).includes('Bounds:'));
+ const copied=await page.evaluate(()=>navigator.clipboard.readText());
+ assert.ok(copied.includes('Bounds:')&&!copied.includes('[Preview truncated'));
+ const preview=await page.locator('#output').inputValue();
+ if(preview.includes('[Preview truncated'))assert.ok(copied.length>preview.length);
+ console.log('verified: full equation copied');
+ await page.selectOption('#equation','0');
+ await page.waitForFunction(()=>!document.querySelector('#copy').disabled&&document.querySelector('#output').value.includes('Create slider'));
+ await page.selectOption('#equation','1');
  await page.click('#reset');await page.click('#play');await page.waitForTimeout(180);await page.click('#play');
  await page.click('#play');await page.click('#reset');await page.click('#finish');
  await page.selectOption('#mode','image');
@@ -58,7 +67,10 @@ try{
    assert.ok(colorCount>20,'no colored strokes');
  }
  await page.selectOption('#trace','gray');await calc();await page.selectOption('#trace','color');
- await page.locator('#detail').fill('500');await page.locator('#cap').fill('200');await page.locator('#sensitivity').fill('90');
+ for(const [id,value] of [['detail','500'],['cap','200'],['sensitivity','90']]){
+   await page.locator('#'+id).evaluate((el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));},value);
+   assert.equal(await page.locator('#'+id).inputValue(),value);
+ }
  await file('image/webp',800,600,'noise');
  for(let i=0;i<3;i++)await calc();
  await page.click('#finish');
@@ -72,4 +84,7 @@ try{
  await file('image/png',400,300,'art');await calc();await page.click('#finish');
  assert.deepEqual(errors,[]);await page.screenshot({path:'browser-verified.png'});
  console.log('Browser regression suite passed');
+}catch(e){
+ if(page){console.error('Failure state:',await page.locator('#status').textContent().catch(()=>''),await page.locator('#stats').textContent().catch(()=>''));await page.screenshot({path:'browser-failure.png',fullPage:true}).catch(()=>{});}
+ throw e;
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r));}

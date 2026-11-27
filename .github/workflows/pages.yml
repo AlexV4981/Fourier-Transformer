@@ -1,14 +1,14 @@
 name: Deploy Fourier Web
 on:
   push:
-    branches: [main]
+    branches: [main, verify-browser-release]
   workflow_dispatch:
 permissions:
   contents: read
   pages: write
   id-token: write
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   native-tests:
@@ -32,14 +32,19 @@ jobs:
       - run: node web/tests/browser.mjs
         timeout-minutes: 15
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: browser-verification
-          path: browser-verified.png
+          path: |
+            browser-verified.png
+            browser-failure.png
+          if-no-files-found: ignore
       - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
         with:
           path: web/site
   deploy:
-    if: github.event.repository.private == false
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == false
     needs: [build, native-tests]
     runs-on: ubuntu-latest
     environment:
@@ -50,3 +55,25 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+  promote-verified:
+    # Only this dedicated release branch is allowed to auto-promote after every test passes.
+    if: github.ref == 'refs/heads/verify-browser-release' && github.event_name == 'push'
+    needs: [build, native-tests]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Promote verified commit without overwriting main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor origin/main HEAD
+          git push origin HEAD:refs/heads/main
+      - name: Dispatch production deployment of verified main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main
