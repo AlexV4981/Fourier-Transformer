@@ -67,7 +67,10 @@ impl eframe::App for App{
                     for i in 0..=d.paths.len()+1{ui.selectable_value(&mut self.selected,i,label(i));}
                 });
                 if old!=self.selected{self.output=manual(d,self.selected);}
-                if ui.button("Copy to clipboard").clicked(){ctx.copy_text(self.output.clone());}
+                if ui.button("Copy expression only").clicked(){ctx.copy_text(fourier_transformer::paste_expression(d,self.selected));}
+                if self.selected>0 && self.selected<=d.paths.len(){
+                    if ui.button("Copy upper t bound").clicked(){ctx.copy_text(fourier_transformer::path_bound(self.selected));}
+                }
                 // Avoid laying out multi-megabyte equations in the UI.
                 let end=self.output.char_indices().nth(4000).map(|(i,_)|i).unwrap_or(self.output.len());
                 egui::ScrollArea::vertical().show(ui,|ui|{ui.monospace(&self.output[..end]);if end<self.output.len(){ui.label("Preview truncated; Copy exports the complete equation.");}});

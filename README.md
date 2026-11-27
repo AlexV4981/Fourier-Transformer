@@ -42,3 +42,6 @@ Pages now publishes only after the native Windows/Linux tests, release WebAssemb
 
 ### Release verification branch
 The dedicated `verify-browser-release` branch runs all native and browser tests without publishing Pages. Its successful run may fast-forward main (never force push) and explicitly dispatch production deployment, which reruns all verification gates. A failure leaves main unchanged. Long equation previews retain parameter bounds; the clipboard receives the full equation.
+
+### Desmos clipboard correction
+The Copy expression only button emits just a single LaTeX expression (or a=0 for setup). Copy upper t bound supplies only the domain value. Preview prose is never sent to Desmos. HTML export still sets each path's domain and color automatically. Large Master Pen expressions may exceed Desmos complexity limits; prefer HTML export, which uses separate pen expressions. Output uses explicit LaTeX delimiters and signed phases. Browser tests check the separate clipboard payloads.

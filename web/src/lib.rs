@@ -37,6 +37,16 @@ pub fn equation(index:usize)->Result<String,JsValue>{
     DRAWING.with(|v|v.borrow().as_ref().map(|d|manual(d,index)).ok_or_else(||err("Calculate first")))
 }
 #[wasm_bindgen]
+pub fn paste_payload(index:usize)->Result<String,JsValue>{
+    DRAWING.with(|v|{
+        let b=v.borrow();let d=b.as_ref().ok_or_else(||err("Calculate first"))?;
+        Ok(serde_json::json!({
+            "expression":fourier_transformer::paste_expression(d,index),
+            "bound":if index>0&&index<=d.paths.len(){fourier_transformer::path_bound(index)}else{String::new()}
+        }).to_string())
+    })
+}
+#[wasm_bindgen]
 pub fn html()->Result<String,JsValue>{
     DRAWING.with(|v|{
         let b=v.borrow();let d=b.as_ref().ok_or_else(||err("Calculate first"))?;

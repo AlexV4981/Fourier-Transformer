@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id), canvas=$('plot'), ctx=canvas.getContext('2d');
-let drawing=[], curves=[], bounds=null, position=0, playing=false, last=0, req=0, full='', busy=false, animationId=0;
+let drawing=[], curves=[], bounds=null, position=0, playing=false, last=0, req=0, full='', paste='', upperBound='', busy=false, animationId=0;
 let worker, pending=null, workerUsed=false, workerReady=false;
 const controls=['play','reset','equation','copy','export','finish'];
 function enabled(v){for(const id of controls)$(id).disabled=!v;}
@@ -17,7 +17,7 @@ function sendCalculation(message, transfer){
  // WASM linear memory cannot shrink. Retire the previous worker on recalculation.
  if(workerUsed||!workerReady){pending={message,transfer};startWorker();}else{workerUsed=true;worker.postMessage(message,transfer);}
 }
-function requestEquation(){full='';$('copy').disabled=true;$('output').value='Loading…';worker.postMessage({kind:'equation',index:Number($('equation').value),id:++req});}
+function requestEquation(){full='';paste='';upperBound='';$('copy').disabled=true;$('copyBound').disabled=true;$('output').value='Loading…';worker.postMessage({kind:'equation',index:Number($('equation').value),id:++req});}
 function handleMessage({data:m}){
  if(m.kind==='ready'){workerReady=true;if(pending){const p=pending;pending=null;workerUsed=true;worker.postMessage(p.message,p.transfer);}else{$('calculate').disabled=false;status('Ready');}}
  if(m.kind==='error'){if(m.operation==='init')workerReady=false;if(m.operation==='equation'&&m.id!==req)return;if(m.operation==='equation'){$('output').value=m.message;$('copy').disabled=true;status(m.message);return;}if(m.operation==='export'){status(m.message);return;}fail(m.message);}
@@ -27,18 +27,18 @@ function handleMessage({data:m}){
   let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
   for(const p of drawing)for(const [x,y] of p.preview){minx=Math.min(minx,x);maxx=Math.max(maxx,x);miny=Math.min(miny,y);maxy=Math.max(maxy,y);}
   bounds=[minx,maxx,miny,maxy];const n=drawing.reduce((s,p)=>s+p.coeff.length,0);
-  $('stats').textContent=drawing.length+' paths · '+n+' coefficients · '+Math.round(n*12/1024)+' KiB coefficient payload'+(m.value.limited?' · limit reached':'');
+  $('stats').textContent=drawing.length+' paths · '+n+' coefficients · '+Math.round(n*12/1024)+' KiB coefficient payload'+(m.value.limited?(drawing.length>=Number($('cap').value)?' · at selected contour cap':' · detail budget adjusted'):'');
   $('equation').replaceChildren(new Option('Instructions',0),...drawing.map((p,i)=>new Option('Path '+(i+1)+' ('+p.name+')',i+1)),new Option('Master Pen',drawing.length+1));
   enabled(true);$('calculate').disabled=false;status('Ready');requestEquation();render();
  }
  if(m.kind==='equation'&&m.id===req){
-   full=m.value;
+   full=m.value;paste=m.payload.expression;upperBound=m.payload.bound;
    // Keep the parameter bounds visible even if the equation is very long.
    const marker=full.lastIndexOf('\n\nBounds:');
    const body=marker>=0?full.slice(0,marker):full;
    const tail=marker>=0?full.slice(marker):'';
    $('output').value=body.length>4000?body.slice(0,4000)+'\n[Preview truncated; copy includes full equation]'+tail:full;
-   $('copy').disabled=false;
+   $('copy').disabled=false;$('copyBound').disabled=!upperBound;
  }
  if(m.kind==='export'&&!busy&&drawing.length){const url=URL.createObjectURL(new Blob([m.value],{type:'text/html'}));const a=document.createElement('a');a.href=url;a.download='fourier-desmos.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status('Desmos HTML exported.');}
 };
@@ -62,7 +62,7 @@ $('mode').onchange=()=>{const image=$('mode').value==='image';$('imageGroup').hi
 $('trace').onchange=()=>$('sensitivityGroup').hidden=$('trace').value!=='color';
 for(const id of ['detail','cap','sensitivity'])$(id).oninput=()=>$(id+'Value').value=$(id).value;
 $('calculate').onclick=async()=>{
- if(busy)return;busy=true;playing=false;animationId++;req++;drawing=[];curves=[];bounds=null;render();enabled(false);full='';$('output').value='';$('calculate').disabled=true;status('Calculating in Rust…');
+ if(busy)return;busy=true;playing=false;animationId++;req++;drawing=[];curves=[];bounds=null;render();enabled(false);$('copyBound').disabled=true;full='';paste='';upperBound='';$('output').value='';$('calculate').disabled=true;status('Calculating in Rust…');
  try{
   const mode=$('mode').value,detail=Number($('detail').value),cap=Number($('cap').value);
   if(mode==='image'){const f=$('file').files[0];if(!f)throw Error('Choose an image');if(f.size>16*1024*1024)throw Error('Maximum file size 16 MiB');const bytes=await f.arrayBuffer();sendCalculation({kind:'calculate',mode,detail,cap,bytes,color:$('trace').value==='color',sensitivity:Number($('sensitivity').value)},[bytes]);}
@@ -73,7 +73,8 @@ $('calculate').onclick=async()=>{
  }catch(e){fail(e);}
 };
 $('equation').onchange=requestEquation;
-$('copy').onclick=async()=>{const selected=req;try{await navigator.clipboard.writeText(full);if(selected===req&&!busy)status('Copied complete equation');}catch(e){if(selected===req&&!busy)status('Clipboard blocked: '+e.message);}};
+$('copy').onclick=async()=>{const selected=req;try{await navigator.clipboard.writeText(paste);if(selected===req&&!busy)status('Copied expression only');}catch(e){if(selected===req&&!busy)status('Clipboard blocked: '+e.message);}};
+$('copyBound').onclick=async()=>{try{await navigator.clipboard.writeText(upperBound);status('Copied upper t bound');}catch(e){status('Clipboard blocked: '+e.message);}};
 $('export').onclick=()=>worker.postMessage({kind:'export'});
 
 startWorker();

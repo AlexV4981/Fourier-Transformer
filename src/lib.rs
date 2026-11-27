@@ -263,29 +263,47 @@ pub fn axis<W:Write>(w:&mut W,p:&DrawingPath,var:&str,y:bool)->io::Result<()>{
     if p.coeff.is_empty(){return write!(w,"0");}
     for (i,c) in p.coeff.iter().enumerate(){
         if i>0 {write!(w,"+")?;}
-        write!(w,"{:.3}\\{}(2\\pi\\cdot{}\\cdot{}+{:.3})",c.amp,if y{"sin"}else{"cos"},c.freq,var,c.phase)?;
+        if c.freq==0{
+            let value=c.amp*if y{c.phase.sin()}else{c.phase.cos()};
+            // Explicit grouping makes a negative constant safe after a plus sign.
+            write!(w,"\\left({:.6}\\right)",value)?;
+        }else{
+            let sign=if c.phase<0.{"-"}else{"+"};
+            write!(w,"{:.6}\\{}\\left({:.6}\\cdot{}{} {:.6}\\right)",c.amp,if y{"sin"}else{"cos"},2.*std::f64::consts::PI*c.freq as f64,var,sign,c.phase.abs())?;
+        }
     } Ok(())
 }
 pub fn equation<W:Write>(w:&mut W,p:&DrawingPath)->io::Result<()>{
-    write!(w,"(")?;axis(w,p,"t",false)?;write!(w,",")?;axis(w,p,"t",true)?;write!(w,")")
+    write!(w,"\\left(")?;axis(w,p,"t",false)?;write!(w,",")?;axis(w,p,"t",true)?;write!(w,"\\right)")
 }
 pub fn master<W:Write>(w:&mut W,d:&Drawing)->io::Result<()>{
-    write!(w,"(")?;
+    write!(w,"\\left(")?;
     for y in [false,true] {
-        if y{write!(w,",")?;}write!(w,"\\{{")?;
+        if y{write!(w,",")?;}write!(w,"\\left\\{{")?;
         for (i,p) in d.paths.iter().enumerate(){
             if i>0{write!(w,",")?;}
             write!(w,"{}\\le a{}{}:",i,if i+1==d.paths.len(){"\\le "}else{"<"},i+1)?;
-            axis(w,p,&format!("(a-{i})"),y)?;
+            axis(w,p,&format!("\\left(a-{i}\\right)"),y)?;
         }
-        write!(w,"\\}}")?;
-    }write!(w,")")
+        write!(w,"\\right\\}}")?;
+    }write!(w,"\\right)")
+}
+/// Clipboard payload is a single expression, with no human-readable instructions.
+pub fn paste_expression(d:&Drawing,index:usize)->String{
+    if index==0{return "a=0".into();}
+    let mut b=Vec::new();
+    if index>d.paths.len(){master(&mut b,d).unwrap();}
+    else{equation(&mut b,&d.paths[index-1]).unwrap();}
+    String::from_utf8(b).unwrap()
+}
+pub fn path_bound(index:usize)->String{
+    format!("\\min\\left(1,\\max\\left(0,a-{}\\right)\\right)",index.saturating_sub(1))
 }
 pub fn manual(d:&Drawing,index:usize)->String{
     let mut b=Vec::new();
     if index==0 {return format!("Create slider a=0, bounds 0 to {}. Copy each path into Desmos and set its t bounds as shown. Paste Master Pen separately.",d.paths.len());}
     if index>d.paths.len(){master(&mut b,d).unwrap();}
-    else{let i=index-1;equation(&mut b,&d.paths[i]).unwrap();write!(b,"\n\nBounds: 0 <= t <= \\min(1,\\max(0,a-{i}))").unwrap();}
+    else{let i=index-1;equation(&mut b,&d.paths[i]).unwrap();write!(b,"\n\nBounds: 0 <= t <= {}",path_bound(index)).unwrap();}
     String::from_utf8(b).unwrap()
 }
 pub fn export_html<W:Write>(w:&mut W,d:&Drawing)->io::Result<()>{
@@ -293,11 +311,11 @@ pub fn export_html<W:Write>(w:&mut W,d:&Drawing)->io::Result<()>{
     writeln!(w,"calc.setExpression({{id:'a',latex:'a=0',sliderBounds:{{min:0,max:{},step:0.01}}}});",d.paths.len())?;
     for (i,p) in d.paths.iter().enumerate(){
         let mut b=Vec::new();equation(&mut b,p)?;
-        let json=serde_json::json!({"id":format!("path_{i}"),"latex":String::from_utf8(b).unwrap(),"parametricDomain":{"min":"0","max":format!("\\min(1,\\max(0,a-{i}))")},"color":format!("#{:02x}{:02x}{:02x}",p.color[0],p.color[1],p.color[2])});
+        let json=serde_json::json!({"id":format!("path_{i}"),"latex":String::from_utf8(b).unwrap(),"parametricDomain":{"min":"0","max":path_bound(i+1)},"color":format!("#{:02x}{:02x}{:02x}",p.color[0],p.color[1],p.color[2])});
         writeln!(w,"calc.setExpression({json});")?;
         // Each pen point is restricted to its active path; no giant master expression.
-        let mut b=Vec::new();write!(b,"(")?;axis(&mut b,p,&format!("(a-{i})"),false)?;write!(b,",")?;axis(&mut b,p,&format!("(a-{i})"),true)?;
-        write!(b,")\\{{{i}\\le a{}{}\\}}",if i+1==d.paths.len(){"\\le "}else{"<"},i+1)?;
+        let mut b=Vec::new();write!(b,"\\left(")?;axis(&mut b,p,&format!("\\left(a-{i}\\right)"),false)?;write!(b,",")?;axis(&mut b,p,&format!("\\left(a-{i}\\right)"),true)?;
+        write!(b,"\\right)\\left\\{{{i}\\le a{}{}\\right\\}}",if i+1==d.paths.len(){"\\le "}else{"<"},i+1)?;
         let json=serde_json::json!({"id":format!("pen_{i}"),"latex":String::from_utf8(b).unwrap(),"color":"#c74440"});
         writeln!(w,"calc.setExpression({json});")?;
     }
@@ -325,6 +343,16 @@ mod tests{
         let decoded=image::load_from_memory(&encoded).unwrap();
         assert_eq!(decoded.to_rgb8(),rgb);
         assert!(!decoded_drawing(decoded,100,80,true,65).unwrap().paths.is_empty());
+    }
+    #[test] fn desmos_clipboard_is_expression_only(){
+        let mut d=Drawing::new();
+        d.add("test".into(),&[C::new(0.,0.),C::new(1.,0.),C::new(0.,0.)],32,10,&mut FftPlanner::new());
+        let s=paste_expression(&d,1);
+        assert!(s.starts_with("\\left(")&&s.ends_with("\\right)"));
+        assert!(!s.contains("Bounds:")&&!s.contains('\n'));
+        assert!(manual(&d,1).contains("Bounds:"));
+        assert_eq!(paste_expression(&d,0),"a=0");
+        assert_eq!(path_bound(1),"\\min\\left(1,\\max\\left(0,a-0\\right)\\right)");
     }
     #[test] fn repeated_points(){let p=[C::new(1.,2.);3];assert_eq!(resample(&p,10),vec![p[0];10]);}
     #[test] fn export(){let mut d=Drawing::new();d.add("test".into(),&[C::new(0.,0.),C::new(1.,0.),C::new(0.,0.)],32,10,&mut FftPlanner::new());let mut b=vec![];export_html(&mut b,&d).unwrap();assert!(String::from_utf8(b).unwrap().contains("parametricDomain"));}
