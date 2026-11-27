@@ -6,19 +6,21 @@ use ttf_parser::OutlineBuilder;
 
 pub const MAX_PATHS: usize = 200;
 pub const MAX_COEFFICIENTS: usize = 12_000;
+pub const HIGH_PATHS: usize = 400;
+pub const HIGH_COEFFICIENTS: usize = 24_000;
 pub const MAX_PIXELS: u64 = 4_000_000;
 pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Coeff { pub freq: i32, pub amp: f32, pub phase: f32 }
 pub struct DrawingPath { pub name: String, pub preview: Vec<C>, pub coeff: Vec<Coeff>, pub color: [u8;3] }
-pub struct Drawing { pub paths: Vec<DrawingPath>, pub limited: bool }
+pub struct Drawing { pub paths: Vec<DrawingPath>, pub limited: bool, pub path_limit: usize, pub coefficient_limit: usize, pub candidates: usize, pub subject_detected: bool }
 impl Drawing {
-    pub fn new() -> Self { Self { paths: Vec::new(), limited: false } }
+    pub fn new() -> Self { Self { paths: Vec::new(), limited: false, path_limit:MAX_PATHS, coefficient_limit:MAX_COEFFICIENTS, candidates:0, subject_detected:false } }
     pub fn add(&mut self, name: String, points: &[C], n: usize, detail: usize, planner: &mut FftPlanner<f32>) {
         let used: usize = self.paths.iter().map(|p| p.coeff.len()).sum();
-        let cap = detail.clamp(1,500).min(MAX_COEFFICIENTS.saturating_sub(used));
-        if cap == 0 || self.paths.len() >= MAX_PATHS { self.limited = true; return; }
+        let cap = detail.clamp(1,500).min(self.coefficient_limit.saturating_sub(used));
+        if cap == 0 || self.paths.len() >= self.path_limit { self.limited = true; return; }
         if points.len() < 2 { return; }
         let mut samples = resample(points, n);
         let preview = samples.iter().step_by(4).copied().collect();
@@ -27,7 +29,7 @@ impl Drawing {
         let mut coeff: Vec<_> = samples.iter().enumerate().filter_map(|(i,c)| {
             let v = *c / n as f32;
             let amp = v.norm();
-            (amp >= 0.001).then_some(Coeff { freq: if i < (n+1)/2 { i as i32 } else { i as i32 - n as i32 }, amp, phase: v.arg() })
+            (amp >= if self.coefficient_limit>MAX_COEFFICIENTS {0.0001}else{0.001}).then_some(Coeff { freq: if i < (n+1)/2 { i as i32 } else { i as i32 - n as i32 }, amp, phase: v.arg() })
         }).collect();
         coeff.sort_unstable_by(|a,b| b.amp.total_cmp(&a.amp));
         if cap < detail && coeff.len() > cap { self.limited = true; }
@@ -107,16 +109,22 @@ pub fn text_drawing(input:&str, detail:usize)->Result<Drawing>{
     if drawing.paths.is_empty(){return Err("No outlines found".into());} Ok(drawing)
 }
 pub fn image_drawing(path:&Path, detail:usize, max_contours:usize, color:bool, sensitivity:u8)->Result<Drawing>{
+    image_drawing_mode(path,detail,max_contours,if color{1}else{0},sensitivity)
+}
+pub fn image_drawing_mode(path:&Path, detail:usize, max_contours:usize, mode:u8, sensitivity:u8)->Result<Drawing>{
     let open=|| image::ImageReader::open(path).map_err(|e|e.to_string())?.with_guessed_format().map_err(|e|e.to_string());
     let (w,h)=open()?.into_dimensions().map_err(|e|e.to_string())?;
     if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS {return Err("Image exceeds 4 megapixels; resize first.".into());}
     let mut reader=open()?;let mut limits=image::Limits::default();
     limits.max_image_width=Some(w);limits.max_image_height=Some(h);limits.max_alloc=Some(64*1024*1024);reader.limits(limits);
-    decoded_drawing(reader.decode().map_err(|e|e.to_string())?, detail, max_contours, color, sensitivity)
+    decoded_drawing_mode(reader.decode().map_err(|e|e.to_string())?, detail, max_contours, mode, sensitivity)
 }
 
 // White compositing prevents invisible RGB under transparent pixels from becoming edges.
 pub fn decoded_drawing(input:image::DynamicImage, detail:usize, cap:usize, color:bool, sensitivity:u8)->Result<Drawing>{
+    decoded_drawing_mode(input,detail,cap,if color{1}else{0},sensitivity)
+}
+pub fn decoded_drawing_mode(input:image::DynamicImage, detail:usize, cap:usize, mode:u8, sensitivity:u8)->Result<Drawing>{
     let (w,h)=(input.width(),input.height());
     if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS {return Err("Image exceeds 4 MP".into());}
     let mut rgb=if input.color().has_alpha(){
@@ -126,18 +134,22 @@ pub fn decoded_drawing(input:image::DynamicImage, detail:usize, cap:usize, color
             image::Rgb(std::array::from_fn(|k|((p[k] as u16*a+255*(255-a)+127)/255) as u8))
         })
     }else{input.into_rgb8()};
-    if !color {return gray_drawing(image::DynamicImage::ImageRgb8(rgb).into_luma8(),detail,cap,false);}
+    if mode==0 {return gray_drawing(image::DynamicImage::ImageRgb8(rgb).into_luma8(),detail,cap,false);}
     // Bound the gradient and contour stage independently of decoded image dimensions.
     const TRACE_PIXELS:f64=1_500_000.;
     if w as f64*h as f64>TRACE_PIXELS{
         let s=(TRACE_PIXELS/(w as f64*h as f64)).sqrt();
         rgb=image::imageops::resize(&rgb,((w as f64*s) as u32).max(1),((h as f64*s) as u32).max(1),image::imageops::FilterType::Triangle);
     }
-    color_drawing(&rgb,detail,cap,sensitivity)
+    if mode>=2{subject_drawing(&rgb,detail,cap,sensitivity,mode==3)}else{color_drawing(&rgb,detail,cap,sensitivity)}
 }
 /// Max-channel Sobel gradient, with directional non-maximum suppression.
 /// Captures chromatic boundaries even when grayscale luminance is identical.
 pub fn color_drawing(rgb:&image::RgbImage,detail:usize,cap:usize,sensitivity:u8)->Result<Drawing>{
+    let mask=edge_mask(rgb,sensitivity)?;
+    trace_colored(mask,rgb,detail,cap)
+}
+fn edge_mask(rgb:&image::RgbImage,sensitivity:u8)->Result<GrayImage>{
     let (w,h)=rgb.dimensions();
     let n=u64::from(w)*u64::from(h);
     if w<3||h<3||n>1_500_000{return Err("Color tracing requires 3x3 to 1.5 MP after scaling".into());}
@@ -167,7 +179,107 @@ pub fn color_drawing(rgb:&image::RgbImage,detail:usize,cap:usize,sensitivity:u8)
         if v>=strength[i-step]&&v>strength[i+step]{mask.as_mut()[i]=255;}
     }}
     drop(strength);drop(direction);
-    trace_colored(mask,rgb,detail,cap)
+    Ok(mask)
+}
+// Estimate a smooth backdrop from both side margins of each scanline.
+// This is a heuristic for isolated subjects, not a semantic object detector.
+fn foreground(rgb:&image::RgbImage)->Option<(GrayImage,Vec<imageproc::point::Point<i32>>)>{
+    let (w,h)=rgb.dimensions();
+    if w<12||h<12{return None;}
+    let mut mask=GrayImage::new(w,h);
+    let margin=(w/12).clamp(2,8);
+    for y in 0..h{
+        let mut l=[0.;3];let mut r=[0.;3];
+        for x in 0..margin{for k in 0..3{
+            l[k]+=rgb.get_pixel(x,y)[k] as f32/margin as f32;
+            r[k]+=rgb.get_pixel(w-1-x,y)[k] as f32/margin as f32;
+        }}
+        for x in 0..w{
+            let t=x as f32/(w-1) as f32;let p=rgb.get_pixel(x,y);
+            let dist=(0..3).map(|k|(p[k] as f32-(l[k]*(1.-t)+r[k]*t)).abs()).fold(0.,f32::max);
+            if dist>32.{mask.put_pixel(x,y,Luma([255]));}
+        }
+    }
+    // Close short holes in the silhouette without storing floating point image copies.
+    use imageproc::distance_transform::Norm;
+    let mask=imageproc::morphology::close(&mask,Norm::LInf,2);
+    let contours=imageproc::contours::find_contours::<i32>(&mask);
+    let area=|pts:&[imageproc::point::Point<i32>]|->f64{
+        if pts.len()<3{return 0.;}
+        pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a,b)|a.x as f64*b.y as f64-b.x as f64*a.y as f64).sum::<f64>().abs()*0.5
+    };
+    let mut outer=contours.into_iter().filter(|c|c.points.len()>8).max_by(|a,b|area(&a.points).total_cmp(&area(&b.points)))?.points;
+    let fraction=area(&outer)/(w as f64*h as f64);
+    if !(0.05..=0.82).contains(&fraction){return None;}
+    if outer.first()==outer.last(){outer.pop();}
+    if outer.len()<3{return None;}
+    let mut filled=GrayImage::new(w,h);
+    imageproc::drawing::draw_polygon_mut(&mut filled,&outer,Luma([255]));
+    let padded=imageproc::morphology::dilate(&filled,Norm::LInf,2);
+    Some((padded,outer))
+}
+pub fn subject_drawing(rgb:&image::RgbImage,detail:usize,cap:usize,sensitivity:u8,high:bool)->Result<Drawing>{
+    let (w,h)=rgb.dimensions();
+    if w<3||h<3||u64::from(w)*u64::from(h)>1_500_000{return Err("Subject tracing requires 3x3 to 1.5 MP".into());}
+    let subject=foreground(rgb);
+    // A moderate prefilter reduces fur and surface noise; high detail retains finer lines.
+    let blurred=imageproc::filter::gaussian_blur_f32(rgb,if high{0.65}else{1.15});
+    let mut mask=edge_mask(&blurred,sensitivity)?;drop(blurred);
+    if let Some((ref region,_))=subject{
+        for (p,m) in mask.pixels_mut().zip(region.pixels()){if m[0]==0{p[0]=0;}}
+    }
+    let mut contours=imageproc::contours::find_contours::<i32>(&mask);drop(mask);
+    contours.retain(|c|c.points.len()>if high{5}else{8});
+    let mut d=Drawing::new();
+    if high{d.path_limit=HIGH_PATHS;d.coefficient_limit=HIGH_COEFFICIENTS;}
+    let cap=cap.clamp(1,d.path_limit);
+    d.subject_detected=subject.is_some();
+    d.candidates=contours.len()+usize::from(d.subject_detected);
+    d.limited=d.candidates>cap;
+    let mut planner=FftPlanner::new();let scale=10./w.max(h) as f32;
+    let to_path=|pts:&[imageproc::point::Point<i32>]|{
+        let mut p:Vec<_>=pts.iter().map(|v|C::new((v.x as f32-w as f32/2.)*scale,(h as f32/2.-v.y as f32)*scale)).collect();
+        if let Some(first)=p.first().copied(){p.push(first);}p
+    };
+    if let Some((_,outline))=subject{
+        let points=to_path(&outline);
+        d.add("Subject silhouette".into(),&points,if high{2048}else{1024},detail,&mut planner);
+        if let Some(p)=d.paths.last_mut(){p.color=stroke_color(rgb,&outline);}
+    }
+    // Prioritize spatially extensive boundaries, then interleave grid regions so
+    // one textured area cannot consume every remaining path.
+    let mut bins:Vec<Vec<(f32,usize)>>=(0..36).map(|_|Vec::new()).collect();
+    for (i,c) in contours.iter().enumerate(){
+        let (mut minx,mut miny,mut maxx,mut maxy)=(i32::MAX,i32::MAX,i32::MIN,i32::MIN);
+        for p in &c.points{minx=minx.min(p.x);miny=miny.min(p.y);maxx=maxx.max(p.x);maxy=maxy.max(p.y);}
+        let dx=(maxx-minx) as f32;let dy=(maxy-miny) as f32;
+        let score=(dx.hypot(dy)+1.)*(c.points.len() as f32).sqrt();
+        let bx=(((minx+maxx) as u64*3/w as u64) as usize).min(5);
+        let by=(((miny+maxy) as u64*3/h as u64) as usize).min(5);
+        bins[by*6+bx].push((score,i));
+    }
+    for b in &mut bins{b.sort_unstable_by(|a,b|b.0.total_cmp(&a.0));}
+    let mut ranked=Vec::new();let mut round=0;
+    let available=cap.saturating_sub(d.paths.len());
+    while ranked.len()<available{
+        let mut row:Vec<_>=bins.iter().filter_map(|b|b.get(round).copied()).collect();
+        if row.is_empty(){break;}
+        row.sort_unstable_by(|a,b|b.0.total_cmp(&a.0));
+        ranked.extend(row.into_iter().take(available-ranked.len()).map(|(_,i)|i));round+=1;
+    }
+    let count=ranked.len();
+    for (order,i) in ranked.into_iter().enumerate(){
+        let c=&contours[i];let used:usize=d.paths.iter().map(|p|p.coeff.len()).sum();
+        let remaining=d.coefficient_limit.saturating_sub(used);
+        let share=(remaining/(count-order).max(1)).min(detail).max(1);
+        let points=to_path(&c.points);
+        let samples=if high{if points.len()>600{2048}else if points.len()>180{1024}else{512}}else if points.len()>200{1024}else{512};
+        let before=d.paths.len();
+        d.add(format!("Subject detail {}",order+1),&points,samples,share,&mut planner);
+        if d.paths.len()>before{d.paths.last_mut().unwrap().color=stroke_color(rgb,&c.points);}
+    }
+    if d.paths.is_empty(){return Err("No subject edges found; try color-aware or increase sensitivity.".into());}
+    Ok(d)
 }
 fn stroke_color(rgb:&image::RgbImage,pts:&[imageproc::point::Point<i32>])->[u8;3]{
     let mut sum=[0u64;3];let mut count=0u64;
@@ -190,7 +302,7 @@ fn trace_colored(mask:GrayImage,rgb:&image::RgbImage,detail:usize,cap:usize)->Re
     let mut contours=imageproc::contours::find_contours::<i32>(&mask);drop(mask);
     contours.retain(|c|c.points.len()>8);
     contours.sort_unstable_by_key(|c|std::cmp::Reverse(c.points.len()));
-    let cap=cap.clamp(1,MAX_PATHS);let mut d=Drawing::new();d.limited=contours.len()>cap;
+    let cap=cap.clamp(1,MAX_PATHS);let mut d=Drawing::new();d.candidates=contours.len();d.limited=contours.len()>cap;
     contours.truncate(cap);
     let total=contours.len();let scale=10./w.max(h) as f32;let mut planner=FftPlanner::new();
     let weights:Vec<f32>=contours.iter().map(|c|(c.points.len() as f32).sqrt()).collect();
@@ -249,7 +361,7 @@ fn trace_mask(mask: GrayImage, detail:usize, max_contours:usize)->Result<Drawing
     contours.retain(|c|c.points.len()>8);
     contours.sort_unstable_by_key(|c|std::cmp::Reverse(c.points.len()));
     let cap=max_contours.clamp(1,MAX_PATHS);
-    let mut drawing=Drawing::new(); drawing.limited=contours.len()>cap;
+    let mut drawing=Drawing::new(); drawing.candidates=contours.len();drawing.limited=contours.len()>cap;
     contours.truncate(cap);
     let scale=10./w.max(h) as f32; let mut planner=FftPlanner::new();
     for (i,c) in contours.into_iter().enumerate(){
@@ -269,7 +381,7 @@ pub fn axis<W:Write>(w:&mut W,p:&DrawingPath,var:&str,y:bool)->io::Result<()>{
             write!(w,"\\left({:.6}\\right)",value)?;
         }else{
             let sign=if c.phase<0.{"-"}else{"+"};
-            write!(w,"{:.6}\\{}\\left({:.6}\\cdot{}{} {:.6}\\right)",c.amp,if y{"sin"}else{"cos"},2.*std::f64::consts::PI*c.freq as f64,var,sign,c.phase.abs())?;
+            write!(w,"{:.6}\\{}\\left({:.6}{}{} {:.6}\\right)",c.amp,if y{"sin"}else{"cos"},2.*std::f64::consts::PI*c.freq as f64,var,sign,c.phase.abs())?;
         }
     } Ok(())
 }
@@ -353,6 +465,21 @@ mod tests{
         assert!(manual(&d,1).contains("Bounds:"));
         assert_eq!(paste_expression(&d,0),"a=0");
         assert_eq!(path_bound(1),"\\min\\left(1,\\max\\left(0,a-0\\right)\\right)");
+    }
+    #[test] fn subject_prioritizes_silhouette(){
+        let rgb=image::RgbImage::from_fn(240,320,|x,y|{
+            let bg=180+(y/10) as u8;
+            if (55..185).contains(&x)&&(35..285).contains(&y){
+                let noise=((x*37+y*19)%50) as u8;
+                image::Rgb([45+noise,35+noise,50+noise])
+            }else{image::Rgb([bg,bg,bg])}
+        });
+        let d=subject_drawing(&rgb,500,400,65,true).unwrap();
+        assert!(d.subject_detected);assert_eq!(d.paths[0].name,"Subject silhouette");
+        assert!(d.paths.len()<=HIGH_PATHS);
+        assert!(d.paths.iter().map(|p|p.coeff.len()).sum::<usize>()<=HIGH_COEFFICIENTS);
+        let span=d.paths[0].preview.iter().map(|p|p.im).fold(f32::NEG_INFINITY,f32::max)-d.paths[0].preview.iter().map(|p|p.im).fold(f32::INFINITY,f32::min);
+        assert!(span>7.0,"silhouette should cover body height");
     }
     #[test] fn repeated_points(){let p=[C::new(1.,2.);3];assert_eq!(resample(&p,10),vec![p[0];10]);}
     #[test] fn export(){let mut d=Drawing::new();d.add("test".into(),&[C::new(0.,0.),C::new(1.,0.),C::new(0.,0.)],32,10,&mut FftPlanner::new());let mut b=vec![];export_html(&mut b,&d).unwrap();assert!(String::from_utf8(b).unwrap().contains("parametricDomain"));}

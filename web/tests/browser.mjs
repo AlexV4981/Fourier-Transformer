@@ -24,14 +24,14 @@ try{
  page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Ready',{},{timeout:60000});
- async function calc(){
+ async function calc(maxPaths=200,maxCoeffs=12000){
    const start=Date.now();
    await page.click('#calculate');
    await page.waitForFunction(()=>document.querySelector('#status').textContent==='Ready'||!document.querySelector('#calculate').disabled,{},{timeout:120000});
    assert.equal(await page.locator('#status').textContent(),'Ready');
    const stats=await page.locator('#stats').textContent();
    const match=stats.match(/(\d+) paths · (\d+) coefficients/);assert.ok(match,stats);
-   assert.ok(+match[1]>0&&+match[1]<=200&&+match[2]>0&&+match[2]<=12000,stats);
+   assert.ok(+match[1]>0&&+match[1]<=maxPaths&&+match[2]>0&&+match[2]<=maxCoeffs,stats);
    console.log('verified:',stats,Date.now()-start+' ms');
    return stats;
  }
@@ -114,6 +114,10 @@ try{
  await file('image/png',2001,2000,'art');await page.click('#calculate');await page.waitForFunction(()=>!document.querySelector('#calculate').disabled,{},{timeout:120000});
  assert.match(await page.locator('#status').textContent(),/4 MP/);
  await file('image/png',400,300,'art');await calc();await page.click('#finish');
+ await page.selectOption('#trace','high');await file('image/png',800,600,'noise');await calc(400,24000);
+ await page.click('#finish');
+ await page.selectOption('#trace','subject');await file('image/png',400,300,'art');await calc();
+ await page.click('#finish');
  assert.deepEqual(errors,[]);await page.screenshot({path:'browser-verified.png'});
  console.log('Browser regression suite passed');
 }catch(e){

@@ -23,11 +23,14 @@ function handleMessage({data:m}){
  if(m.kind==='error'){if(m.operation==='init')workerReady=false;if(m.operation==='equation'&&m.id!==req)return;if(m.operation==='equation'){$('output').value=m.message;$('copy').disabled=true;status(m.message);return;}if(m.operation==='export'){status(m.message);return;}fail(m.message);}
  if(m.kind==='drawing'){
   busy=false;drawing=m.value.paths;position=0;playing=false;$('play').textContent='Play';
-  curves=drawing.map(p=>Array.from({length:513},(_,i)=>point(p,i/512)));
+  curves=drawing.map(p=>{
+    const n=Math.min(4096,Math.max(512,4*Math.max(0,...p.coeff.map(c=>Math.abs(c[0])))));
+    return Array.from({length:n+1},(_,i)=>point(p,i/n));
+  });
   let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
   for(const p of drawing)for(const [x,y] of p.preview){minx=Math.min(minx,x);maxx=Math.max(maxx,x);miny=Math.min(miny,y);maxy=Math.max(maxy,y);}
   bounds=[minx,maxx,miny,maxy];const n=drawing.reduce((s,p)=>s+p.coeff.length,0);
-  $('stats').textContent=drawing.length+' paths · '+n+' coefficients · '+Math.round(n*12/1024)+' KiB coefficient payload'+(m.value.limited?(drawing.length>=Number($('cap').value)?' · at selected contour cap':' · detail budget adjusted'):'');
+  $('stats').textContent=drawing.length+' paths · '+n+' coefficients · '+Math.round(n*12/1024)+' KiB coefficient payload'+(m.value.candidates?' · '+m.value.candidates+' candidate paths':'')+(m.value.subjectDetected?' · foreground prioritized':'')+(m.value.limited?' · some detail omitted by selected limits':'');
   $('equation').replaceChildren(new Option('Instructions',0),...drawing.map((p,i)=>new Option('Path '+(i+1)+' ('+p.name+')',i+1)),new Option('Master Pen',drawing.length+1));
   enabled(true);$('calculate').disabled=false;status('Ready');requestEquation();render();
  }
@@ -50,7 +53,7 @@ function render(){
  if($('original').checked)for(const p of drawing)line(p.preview,'#d1d5db');
  const i=Math.min(drawing.length-1,Math.floor(position)),t=Math.min(1,position-i);
  for(let j=0;j<i;j++)line(curves[j],$('ink').checked?drawing[j].color:'#2563eb',1.6);
- line([...curves[i].slice(0,Math.floor(t*512)+1),point(drawing[i],t)],$('ink').checked?drawing[i].color:'#2563eb',1.6);
+ line([...curves[i].slice(0,Math.floor(t*(curves[i].length-1))+1),point(drawing[i],t)],$('ink').checked?drawing[i].color:'#2563eb',1.6);
  if($('circles').checked&&position<drawing.length){let x=0,y=0;for(const [f,r,a] of drawing[i].coeff){const q=2*Math.PI*f*t+a, p=project([x,y]);const nx=x+r*Math.cos(q),ny=y+r*Math.sin(q),e=project([nx,ny]);const edge=project([x+r,y]);ctx.beginPath();ctx.arc(p[0],p[1],Math.abs(edge[0]-p[0]),0,Math.PI*2);ctx.strokeStyle='#49647b';ctx.lineWidth=.7;ctx.stroke();ctx.beginPath();ctx.moveTo(...p);ctx.lineTo(...e);ctx.strokeStyle='#fbbf24';ctx.stroke();x=nx;y=ny;}const p=project([x,y]);ctx.beginPath();ctx.arc(...p,3,0,Math.PI*2);ctx.fillStyle='#f87171';ctx.fill();}
 }
 function frame(now,id){if(!playing||id!==animationId)return;position=Math.min(drawing.length,position+Math.min((now-last)/1000,.1)*Number($('speed').value));last=now;render();if(position<drawing.length)requestAnimationFrame(next=>frame(next,id));else{playing=false;$('play').textContent='Play';}}
@@ -59,13 +62,20 @@ $('reset').onclick=()=>{playing=false;animationId++;position=0;$('play').textCon
 $('finish').onclick=()=>{playing=false;animationId++;position=drawing.length;$('play').textContent='Play';render();};
 for(const id of ['circles','original','ink'])$(id).onchange=render;
 $('mode').onchange=()=>{const image=$('mode').value==='image';$('imageGroup').hidden=!image;$('colorGroup').hidden=!image;$('textGroup').hidden=image;$('detail').value=image?300:150;$('detailValue').value=$('detail').value;};
-$('trace').onchange=()=>$('sensitivityGroup').hidden=$('trace').value!=='color';
+$('trace').onchange=()=>{
+ const trace=$('trace').value;
+ $('sensitivityGroup').hidden=trace==='gray';
+ $('cap').max=trace==='high'?400:200;
+ if(trace==='high'){$('cap').value=400;$('detail').value=500;$('sensitivity').value=65;}
+ else if(trace==='subject'){$('cap').value=150;$('detail').value=300;$('sensitivity').value=45;}
+ for(const id of ['cap','detail','sensitivity'])$(id+'Value').value=$(id).value;
+};
 for(const id of ['detail','cap','sensitivity'])$(id).oninput=()=>$(id+'Value').value=$(id).value;
 $('calculate').onclick=async()=>{
  if(busy)return;busy=true;playing=false;animationId++;req++;drawing=[];curves=[];bounds=null;render();enabled(false);$('copyBound').disabled=true;full='';paste='';upperBound='';$('output').value='';$('calculate').disabled=true;status('Calculating in Rust…');
  try{
   const mode=$('mode').value,detail=Number($('detail').value),cap=Number($('cap').value);
-  if(mode==='image'){const f=$('file').files[0];if(!f)throw Error('Choose an image');if(f.size>16*1024*1024)throw Error('Maximum file size 16 MiB');const bytes=await f.arrayBuffer();sendCalculation({kind:'calculate',mode,detail,cap,bytes,color:$('trace').value==='color',sensitivity:Number($('sensitivity').value)},[bytes]);}
+  if(mode==='image'){const f=$('file').files[0];if(!f)throw Error('Choose an image');if(f.size>16*1024*1024)throw Error('Maximum file size 16 MiB');const bytes=await f.arrayBuffer();sendCalculation({kind:'calculate',mode,detail,cap,bytes,traceMode:({gray:0,color:1,subject:2,high:3})[$('trace').value],sensitivity:Number($('sensitivity').value)},[bytes]);}
   else{
    const text=$('text').value.trim().replaceAll('[heart]','♥').replaceAll('<3','♥').replaceAll('[square]','■').replaceAll('[star]','★').replaceAll('[note]','♫');if(!text)throw Error('Enter some text');
    const c=document.createElement('canvas'),g=c.getContext('2d',{willReadFrequently:true});g.font='100px Arial, sans-serif';const width=g.measureText(text).width;const font=Math.min(100,3600/Math.max(width,1)*100);g.font=font+'px Arial, sans-serif';c.width=Math.ceil(g.measureText(text).width)+32;c.height=Math.ceil(font*1.7)+32;g.fillStyle='white';g.fillRect(0,0,c.width,c.height);g.font=font+'px Arial, sans-serif';g.textBaseline='middle';g.fillStyle='black';g.fillText(text,16,c.height/2);const rgba=g.getImageData(0,0,c.width,c.height).data;const gray=new Uint8Array(c.width*c.height);for(let i=0;i<gray.length;i++)gray[i]=rgba[i*4];sendCalculation({kind:'calculate',mode,detail,cap,w:c.width,h:c.height,bytes:gray.buffer},[gray.buffer]);

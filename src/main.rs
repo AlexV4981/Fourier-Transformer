@@ -1,21 +1,21 @@
 use eframe::egui;
-use fourier_transformer::{Drawing, text_drawing, image_drawing, manual, export_html};
+use fourier_transformer::{Drawing, text_drawing, image_drawing_mode, manual, export_html};
 use std::{path::PathBuf, sync::mpsc, io::{BufWriter,Write}};
 struct App {
-    image_mode:bool,text:String,file:Option<PathBuf>,detail:usize,contours:usize,color:bool,sensitivity:u8,
+    image_mode:bool,text:String,file:Option<PathBuf>,detail:usize,contours:usize,mode:u8,sensitivity:u8,
     drawing:Option<Drawing>,selected:usize,output:String,status:String,
     worker:Option<mpsc::Receiver<Result<Drawing,String>>>,
 }
 impl Default for App {
-    fn default()->Self{Self{image_mode:false,text:"I [heart] MATH".into(),file:None,detail:150,contours:80,color:true,sensitivity:65,drawing:None,selected:0,output:String::new(),status:String::new(),worker:None}}
+    fn default()->Self{Self{image_mode:false,text:"I [heart] MATH".into(),file:None,detail:150,contours:80,mode:2,sensitivity:65,drawing:None,selected:0,output:String::new(),status:String::new(),worker:None}}
 }
 impl App {
     fn calculate(&mut self,ctx:egui::Context){
-        let image=self.image_mode;let text=self.text.clone();let file=self.file.clone();let detail=self.detail;let contours=self.contours;let color=self.color;let sensitivity=self.sensitivity;
+        let image=self.image_mode;let text=self.text.clone();let file=self.file.clone();let detail=self.detail;let contours=self.contours;let mode=self.mode;let sensitivity=self.sensitivity;
         self.drawing=None;self.output=String::new();self.selected=0;self.status="Calculating…".into();
         let (tx,rx)=mpsc::channel();self.worker=Some(rx);
         std::thread::spawn(move||{
-            let result=if image{file.ok_or_else(||"Select an image".to_string()).and_then(|p|image_drawing(&p,detail,contours,color,sensitivity))}else{text_drawing(&text,detail)};
+            let result=if image{file.ok_or_else(||"Select an image".to_string()).and_then(|p|image_drawing_mode(&p,detail,contours,mode,sensitivity))}else{text_drawing(&text,detail)};
             let _=tx.send(result);ctx.request_repaint();
         });
     }
@@ -50,9 +50,13 @@ impl eframe::App for App{
                 if self.image_mode{
                     if ui.button("Browse image").clicked(){self.file=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","bmp","webp"]).pick_file();}
                     if let Some(p)=&self.file{ui.label(p.display().to_string());}
-                    ui.checkbox(&mut self.color,"Color-aware tracing");
-                    if self.color {ui.add(egui::Slider::new(&mut self.sensitivity,1..=100).text("Edge sensitivity"));}
-                    ui.add(egui::Slider::new(&mut self.contours,5..=200).text("Max contours"));
+                    egui::ComboBox::from_id_salt("trace_mode").selected_text(["Grayscale","Color-aware","Subject outline","Subject high detail"][self.mode as usize]).show_ui(ui,|ui|{
+                        for (i,name) in ["Grayscale","Color-aware","Subject outline","Subject high detail"].iter().enumerate(){ui.selectable_value(&mut self.mode,i as u8,*name);}
+                    });
+                    if self.mode!=0 {ui.add(egui::Slider::new(&mut self.sensitivity,1..=100).text("Edge sensitivity"));}
+                    let max=if self.mode==3{400}else{200};
+                    self.contours=self.contours.min(max);
+                    ui.add(egui::Slider::new(&mut self.contours,5..=max).text("Max contours"));
                 }else{ui.text_edit_singleline(&mut self.text);}
                 ui.add(egui::Slider::new(&mut self.detail,50..=500).text("Max epicycles"));
                 if ui.button("Calculate & Plot").clicked(){self.calculate(ctx.clone());}
