@@ -5,8 +5,11 @@ import { readFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 const root=resolve('web/site');
 const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.wasm':'application/wasm','.json':'application/json'};
+let exportedHtml='';
 const server=createServer(async(req,res)=>{
- try{const url=new URL(req.url,'http://localhost');const file=resolve(root,'.'+(url.pathname==='/'?'/index.html':url.pathname));
+ try{const url=new URL(req.url,'http://localhost');
+ if(url.pathname==='/desmos-test.html'){res.writeHead(200,{'Content-Type':'text/html'});res.end(exportedHtml);return;}
+ const file=resolve(root,'.'+(url.pathname==='/'?'/index.html':url.pathname));
  if(!file.startsWith(root+'/')){res.writeHead(403).end();return;}
  const data=await readFile(file);res.writeHead(200,{'Content-Type':mime[extname(file)]||'application/octet-stream'});res.end(data);
  }catch{res.writeHead(404).end();}
@@ -70,6 +73,31 @@ try{
    const colorCount=await page.evaluate(()=>{const c=document.querySelector('#plot'),data=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let count=0;for(let i=0;i<data.length;i+=4)if(Math.max(data[i],data[i+1],data[i+2])-Math.min(data[i],data[i+1],data[i+2])>50)count++;return count;});
    assert.ok(colorCount>20,'no colored strokes');
  }
+ // Real Desmos parser: load the generated HTML with the official demo API,
+ // not a mock that only checks for strings.
+ const graphDownload=page.waitForEvent('download');await page.click('#export');
+ exportedHtml=await readFile(await (await graphDownload).path(),'utf8');
+ const graph=await context.newPage();
+ try{
+   await graph.goto('http://127.0.0.1:'+server.address().port+'/desmos-test.html',{timeout:60000});
+   await graph.waitForFunction(()=>typeof calc!=='undefined'&&typeof calc.getExpressions==='function',null,{timeout:60000});
+   const ids=await graph.evaluate(()=>{
+     const all=calc.getExpressions();const paths=all.filter(x=>x.id.startsWith('path_'));
+     calc.setExpression({id:'a',latex:'a='+paths.length});
+     return all.map(x=>x.id);
+   });
+   assert.ok(ids.some(x=>x.startsWith('path_'))&&ids.some(x=>x.startsWith('pen_')));
+   await graph.evaluate(({copied,bound})=>{
+     calc.setExpression({id:'clipboard_test',latex:copied,parametricDomain:{min:'0',max:bound}});
+   },{copied,bound});
+   await graph.waitForFunction(ids=>ids.every(id=>calc.expressionAnalysis[id]!==undefined),[...ids,'clipboard_test'],{timeout:90000});
+   const analysis=await graph.evaluate(ids=>ids.map(id=>({id,...calc.expressionAnalysis[id]})),[...ids,'clipboard_test']);
+   const failures=analysis.filter(x=>x.isError);
+   assert.deepEqual(failures,[],'Desmos expression errors: '+JSON.stringify(failures));
+   assert.ok(analysis.find(x=>x.id==='clipboard_test').isGraphable,'Pasted expression not graphable');
+   assert.ok(analysis.filter(x=>x.id.startsWith('path_')).every(x=>x.isGraphable),'Exported paths not graphable');
+   console.log('verified: real Desmos parser accepted exported paths, pens and clipboard expression');
+ }finally{await graph.close();}
  await page.selectOption('#trace','gray');await calc();await page.selectOption('#trace','color');
  for(const [id,value] of [['detail','500'],['cap','200'],['sensitivity','90']]){
    await page.locator('#'+id).evaluate((el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));},value);
