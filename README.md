@@ -25,3 +25,11 @@ These limits bound major data structures, not total process RSS. Contour extract
 
 ## Validation
 Unit tests cover FFT frequency, repeated points and export structure. Windows/Linux CI checks the build and runs tests. No measured RAM reduction or visual parity is claimed until tested on identical inputs. Compare process peak working set in Task Manager or /usr/bin/time -v using the same image, contour count and detail. Measure browser separately and check repeated calculations, large images, symbols, and Desmos animation.
+
+## Browser edition (GitHub Pages)
+
+The browser version uses the same Rust FFT, contour and Desmos engine through WebAssembly in a dedicated Web Worker. Text is rasterized locally with browser fonts (not identical to native glyph outlines); images use Rust decoding and thresholding. Play, pause, reset, speed, source outlines, epicycle circles, manual equations and HTML export are supported. Input stays in the browser. The canvas uses 256 reconstruction steps per path for its visual animation; Desmos export uses actual retained coefficients.
+
+For GitHub Free: review commit history before making the repo public, then Settings → Pages → Source → GitHub Actions. Run the Deploy Fourier Web workflow manually after enabling Pages. Site URL: https://alexv4981.github.io/Fourier-Transformer/ (after successful deployment). No backend or hosting bill. The workflow builds the WASM artifact before publishing. Native and original Python versions remain in this repository.
+
+Local web build (optional): install wasm-pack, run `wasm-pack build web --target web --release --out-dir site/pkg`, then serve web/site over HTTP. Do not open index.html using file://.

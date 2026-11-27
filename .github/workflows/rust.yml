@@ -1,7 +1,7 @@
 name: Rust checks
 on:
   push:
-    branches: [rust-memory-optimized]
+    branches: [main, rust-memory-optimized]
   pull_request:
 jobs:
   test:

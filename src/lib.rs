@@ -1,6 +1,7 @@
 use std::{io::{self, Write}, path::Path};
 use rustfft::{FftPlanner, num_complex::Complex32 as C};
 use image::{GrayImage, Luma};
+#[cfg(not(target_arch = "wasm32"))]
 use ttf_parser::OutlineBuilder;
 
 pub const MAX_PATHS: usize = 200;
@@ -37,6 +38,7 @@ impl Drawing {
 }
 pub fn resample(points: &[C], n: usize) -> Vec<C> {
     if points.is_empty() || n == 0 { return vec![]; }
+    if points.len() == 1 { return vec![points[0]; n]; }
     let total: f32 = points.windows(2).map(|p| (p[1]-p[0]).norm()).sum();
     if total <= f32::EPSILON { return vec![points[0]; n]; }
     let mut j=0; let mut start=0.; let mut len=(points[1]-points[0]).norm();
@@ -49,11 +51,14 @@ pub fn resample(points: &[C], n: usize) -> Vec<C> {
         points[j]+(points[j+1]-points[j])*u
     }).collect()
 }
+#[cfg(not(target_arch = "wasm32"))]
 struct Outline { paths: Vec<Vec<C>>, current: Vec<C> }
+#[cfg(not(target_arch = "wasm32"))]
 impl Outline {
     fn last(&self)->C { self.current.last().copied().unwrap_or_default() }
     fn flush(&mut self) { if self.current.len()>1 { self.paths.push(std::mem::take(&mut self.current)); } else { self.current.clear(); } }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl OutlineBuilder for Outline {
     fn move_to(&mut self,x:f32,y:f32){self.flush();self.current.push(C::new(x,y));}
     fn line_to(&mut self,x:f32,y:f32){self.current.push(C::new(x,y));}
@@ -67,6 +72,7 @@ impl OutlineBuilder for Outline {
     }
     fn close(&mut self){if let Some(p)=self.current.first().copied(){self.current.push(p);}self.flush();}
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn text_drawing(input:&str, detail:usize)->Result<Drawing>{
     let text=input.trim().replace("[heart]","♥").replace("<3","♥").replace("[square]","■").replace("[star]","★").replace("[note]","♫");
     if text.chars().count()>200 {return Err("Text limit: 200 characters".into());}
@@ -107,7 +113,18 @@ pub fn image_drawing(path:&Path, detail:usize, max_contours:usize)->Result<Drawi
     let mut reader=open()?;let mut limits=image::Limits::default();
     limits.max_image_width=Some(w);limits.max_image_height=Some(h);limits.max_alloc=Some(64*1024*1024);reader.limits(limits);
     let gray=reader.decode().map_err(|e|e.to_string())?.into_luma8();
-    // Separable 3x3 binomial blur, followed by local Gaussian threshold.
+    gray_drawing(gray, detail, max_contours, false)
+}
+
+pub fn gray_drawing(gray: GrayImage, detail: usize, max_contours: usize, solid: bool) -> Result<Drawing> {
+    let (w,h)=gray.dimensions();
+    if w==0 || h==0 || u64::from(w)*u64::from(h)>MAX_PIXELS { return Err("Image exceeds 4 megapixels".into()); }
+    if solid {
+        let mut mask=gray;
+        for p in mask.pixels_mut() { p[0]=if p[0]<128 {255}else{0}; }
+        return trace_mask(mask, detail, max_contours);
+    }
+    // Gaussian blur, followed by local Gaussian threshold.
     let blurred=imageproc::filter::gaussian_blur_f32(&gray,0.85);drop(gray);
     let mut mask=GrayImage::new(w,h);
     let weights=[1u32,10,45,120,210,252,210,120,45,10,1];
@@ -128,6 +145,10 @@ pub fn image_drawing(path:&Path, detail:usize, max_contours:usize)->Result<Drawi
         mask.put_pixel(x,y,Luma([if (blurred.get_pixel(x,y)[0] as f32)<mean-2. {255}else{0}]));
     }}
     drop(horizontal);drop(blurred);
+    trace_mask(mask,detail,max_contours)
+}
+fn trace_mask(mask: GrayImage, detail:usize, max_contours:usize)->Result<Drawing>{
+    let (w,h)=mask.dimensions();
     let mut contours=imageproc::contours::find_contours::<i32>(&mask);drop(mask);
     contours.retain(|c|c.points.len()>8);
     contours.sort_unstable_by_key(|c|std::cmp::Reverse(c.points.len()));
