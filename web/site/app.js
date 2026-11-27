@@ -1,15 +1,24 @@
 const $=id=>document.getElementById(id), canvas=$('plot'), ctx=canvas.getContext('2d');
-let drawing=[], curves=[], bounds=null, position=0, playing=false, last=0, req=0, full='', busy=false;
-const worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
+let drawing=[], curves=[], bounds=null, position=0, playing=false, last=0, req=0, full='', busy=false, animationId=0;
+let worker, pending=null, workerUsed=false;
 const controls=['play','reset','equation','copy','export','finish'];
 function enabled(v){for(const id of controls)$(id).disabled=!v;}
 function status(s){$('status').textContent=s;}
 function fail(e){busy=false;$('calculate').disabled=false;status(String(e));}
-worker.onerror=e=>fail(e.message);
+function startWorker(){
+ if(worker)worker.terminate();
+ worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
+ worker.onerror=e=>{pending=null;fail(e.message);};
+ worker.onmessage=handleMessage;
+}
+function sendCalculation(message, transfer){
+ // WASM linear memory cannot shrink. Retire the previous worker on recalculation.
+ if(workerUsed){pending={message,transfer};startWorker();}else{workerUsed=true;worker.postMessage(message,transfer);}
+}
 function requestEquation(){full='';$('copy').disabled=true;$('output').value='Loading…';worker.postMessage({kind:'equation',index:Number($('equation').value),id:++req});}
-worker.onmessage=({data:m})=>{
- if(m.kind==='ready'){$('calculate').disabled=false;status('Ready');}
- if(m.kind==='error'){fail(m.message);}
+function handleMessage({data:m}){
+ if(m.kind==='ready'){if(pending){const p=pending;pending=null;workerUsed=true;worker.postMessage(p.message,p.transfer);}else{$('calculate').disabled=false;status('Ready');}}
+ if(m.kind==='error'){pending=null;fail(m.message);}
  if(m.kind==='drawing'){
   busy=false;drawing=m.value.paths;position=0;playing=false;$('play').textContent='Play';
   curves=drawing.map(p=>Array.from({length:513},(_,i)=>point(p,i/512)));
@@ -34,25 +43,27 @@ function render(){
  line([...curves[i].slice(0,Math.floor(t*512)+1),point(drawing[i],t)],$('ink').checked?drawing[i].color:'#2563eb',1.6);
  if($('circles').checked&&position<drawing.length){let x=0,y=0;for(const [f,r,a] of drawing[i].coeff){const q=2*Math.PI*f*t+a, p=project([x,y]);const nx=x+r*Math.cos(q),ny=y+r*Math.sin(q),e=project([nx,ny]);const edge=project([x+r,y]);ctx.beginPath();ctx.arc(p[0],p[1],Math.abs(edge[0]-p[0]),0,Math.PI*2);ctx.strokeStyle='#49647b';ctx.lineWidth=.7;ctx.stroke();ctx.beginPath();ctx.moveTo(...p);ctx.lineTo(...e);ctx.strokeStyle='#fbbf24';ctx.stroke();x=nx;y=ny;}const p=project([x,y]);ctx.beginPath();ctx.arc(...p,3,0,Math.PI*2);ctx.fillStyle='#f87171';ctx.fill();}
 }
-function frame(now){if(!playing)return;position=Math.min(drawing.length,position+Math.min((now-last)/1000,.1)*Number($('speed').value));last=now;render();if(position<drawing.length)requestAnimationFrame(frame);else{playing=false;$('play').textContent='Play';}}
-$('play').onclick=()=>{if(playing){playing=false;$('play').textContent='Play';return;}if(position>=drawing.length)position=0;playing=true;last=performance.now();$('play').textContent='Pause';requestAnimationFrame(frame);};
-$('reset').onclick=()=>{playing=false;position=0;$('play').textContent='Play';render();};
-$('finish').onclick=()=>{playing=false;position=drawing.length;$('play').textContent='Play';render();};
+function frame(now,id){if(!playing||id!==animationId)return;position=Math.min(drawing.length,position+Math.min((now-last)/1000,.1)*Number($('speed').value));last=now;render();if(position<drawing.length)requestAnimationFrame(next=>frame(next,id));else{playing=false;$('play').textContent='Play';}}
+$('play').onclick=()=>{if(playing){playing=false;animationId++;$('play').textContent='Play';return;}if(position>=drawing.length)position=0;playing=true;last=performance.now();$('play').textContent='Pause';const id=++animationId;requestAnimationFrame(now=>frame(now,id));};
+$('reset').onclick=()=>{playing=false;animationId++;position=0;$('play').textContent='Play';render();};
+$('finish').onclick=()=>{playing=false;animationId++;position=drawing.length;$('play').textContent='Play';render();};
 for(const id of ['circles','original','ink'])$(id).onchange=render;
 $('mode').onchange=()=>{const image=$('mode').value==='image';$('imageGroup').hidden=!image;$('colorGroup').hidden=!image;$('textGroup').hidden=image;$('detail').value=image?300:150;$('detailValue').value=$('detail').value;};
 $('trace').onchange=()=>$('sensitivityGroup').hidden=$('trace').value!=='color';
 for(const id of ['detail','cap','sensitivity'])$(id).oninput=()=>$(id+'Value').value=$(id).value;
 $('calculate').onclick=async()=>{
- if(busy)return;busy=true;playing=false;drawing=[];curves=[];bounds=null;render();enabled(false);full='';$('output').value='';$('calculate').disabled=true;status('Calculating in Rust…');
+ if(busy)return;busy=true;playing=false;animationId++;req++;drawing=[];curves=[];bounds=null;render();enabled(false);full='';$('output').value='';$('calculate').disabled=true;status('Calculating in Rust…');
  try{
   const mode=$('mode').value,detail=Number($('detail').value),cap=Number($('cap').value);
-  if(mode==='image'){const f=$('file').files[0];if(!f)throw Error('Choose an image');if(f.size>16*1024*1024)throw Error('Maximum file size 16 MiB');const bytes=await f.arrayBuffer();worker.postMessage({kind:'calculate',mode,detail,cap,bytes,color:$('trace').value==='color',sensitivity:Number($('sensitivity').value)},[bytes]);}
+  if(mode==='image'){const f=$('file').files[0];if(!f)throw Error('Choose an image');if(f.size>16*1024*1024)throw Error('Maximum file size 16 MiB');const bytes=await f.arrayBuffer();sendCalculation({kind:'calculate',mode,detail,cap,bytes,color:$('trace').value==='color',sensitivity:Number($('sensitivity').value)},[bytes]);}
   else{
    const text=$('text').value.trim().replaceAll('[heart]','♥').replaceAll('<3','♥').replaceAll('[square]','■').replaceAll('[star]','★').replaceAll('[note]','♫');if(!text)throw Error('Enter some text');
-   const c=document.createElement('canvas'),g=c.getContext('2d',{willReadFrequently:true});g.font='100px Arial, sans-serif';const width=g.measureText(text).width;const font=Math.min(100,3600/Math.max(width,1)*100);g.font=font+'px Arial, sans-serif';c.width=Math.ceil(g.measureText(text).width)+32;c.height=Math.ceil(font*1.7)+32;g.fillStyle='white';g.fillRect(0,0,c.width,c.height);g.font=font+'px Arial, sans-serif';g.textBaseline='middle';g.fillStyle='black';g.fillText(text,16,c.height/2);const rgba=g.getImageData(0,0,c.width,c.height).data;const gray=new Uint8Array(c.width*c.height);for(let i=0;i<gray.length;i++)gray[i]=rgba[i*4];worker.postMessage({kind:'calculate',mode,detail,cap,w:c.width,h:c.height,bytes:gray.buffer},[gray.buffer]);
+   const c=document.createElement('canvas'),g=c.getContext('2d',{willReadFrequently:true});g.font='100px Arial, sans-serif';const width=g.measureText(text).width;const font=Math.min(100,3600/Math.max(width,1)*100);g.font=font+'px Arial, sans-serif';c.width=Math.ceil(g.measureText(text).width)+32;c.height=Math.ceil(font*1.7)+32;g.fillStyle='white';g.fillRect(0,0,c.width,c.height);g.font=font+'px Arial, sans-serif';g.textBaseline='middle';g.fillStyle='black';g.fillText(text,16,c.height/2);const rgba=g.getImageData(0,0,c.width,c.height).data;const gray=new Uint8Array(c.width*c.height);for(let i=0;i<gray.length;i++)gray[i]=rgba[i*4];sendCalculation({kind:'calculate',mode,detail,cap,w:c.width,h:c.height,bytes:gray.buffer},[gray.buffer]);
   }
  }catch(e){fail(e);}
 };
 $('equation').onchange=requestEquation;
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(full);status('Copied complete equation');}catch(e){status('Clipboard blocked: '+e.message);}};
 $('export').onclick=()=>worker.postMessage({kind:'export'});
+
+startWorker();

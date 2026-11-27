@@ -11,6 +11,8 @@ concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
+  native-tests:
+    uses: ./.github/workflows/rust.yml
   build:
     runs-on: ubuntu-latest
     steps:
@@ -21,12 +23,23 @@ jobs:
       - run: cargo install wasm-pack --locked
       - run: wasm-pack build web --target web --release --out-dir site/pkg
       - run: test -s web/site/pkg/fourier_web_bg.wasm && test -s web/site/pkg/fourier_web.js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --prefix web/tests --no-audit --no-fund
+      - run: web/tests/node_modules/.bin/playwright install --with-deps chromium
+      - run: node web/tests/browser.mjs
+        timeout-minutes: 15
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-verification
+          path: browser-verified.png
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web/site
   deploy:
     if: github.event.repository.private == false
-    needs: build
+    needs: [build, native-tests]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

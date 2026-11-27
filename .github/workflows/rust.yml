@@ -1,7 +1,8 @@
 name: Rust checks
 on:
+  workflow_call:
   push:
-    branches: [main, rust-memory-optimized]
+    branches: [rust-memory-optimized]
   pull_request:
 jobs:
   test:

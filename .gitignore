@@ -1,3 +1,5 @@
 /target/
 /web/target/
 /web/site/pkg/
+/web/tests/node_modules/
+/browser-verified.png
